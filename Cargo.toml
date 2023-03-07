@@ -1,0 +1,18 @@
+[package]
+name = "derive_try_from"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "derive(TryFrom)"
+categories = ["rust-patterns"]
+repository = "https://github.com/qthree/derive_try_from"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+quote = "1"
+syn = { version = "1", features = ["full"] }
+proc-macro2 = "1"
+
+[lib]
+proc-macro = true
