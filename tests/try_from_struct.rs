@@ -1,8 +1,8 @@
 use std::{convert::Infallible, num::TryFromIntError};
 
-use derive_try_from::TryFrom;
+use derive_convert::Convert;
 
-#[derive(TryFrom, PartialEq, Debug)]
+#[derive(Convert, PartialEq, Debug)]
 #[try_from(V1 = "Rect1", V2 = "v2::Rect2", Error = "Error")]
 struct Rect {
     #[try_from(V2(new = "String::new"))]

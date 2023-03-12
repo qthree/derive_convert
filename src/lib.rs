@@ -8,7 +8,7 @@ use syn::{
     Fields, Lit, Meta, MetaList, MetaNameValue, NestedMeta, Path, Type, TypePath,
 };
 
-#[proc_macro_derive(TryFrom, attributes(try_from, try_from_self))]
+#[proc_macro_derive(Convert, attributes(from, from_self, try_from, try_from_self))]
 pub fn derive_convert(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     if !input.generics.params.is_empty() {
@@ -27,6 +27,8 @@ pub fn derive_convert(input: TokenStream) -> TokenStream {
 
 fn derive_convert_struct(
     ContainerAttrs {
+        from,
+        from_self,
         try_from,
         try_from_self,
     }: &ContainerAttrs,
@@ -38,6 +40,12 @@ fn derive_convert_struct(
         path: subject.clone().into(),
     });
     [
+        from
+            .as_ref()
+            .map(|attrs| derive_from_struct(attrs, &subject, data, false)),
+        from_self
+            .as_ref()
+            .map(|attrs| derive_from_struct(attrs, &subject, data, true)),
         try_from
             .as_ref()
             .map(|attrs| derive_try_from_struct(attrs, &subject, data, false)),
@@ -48,6 +56,41 @@ fn derive_convert_struct(
     .into_iter()
     .flatten()
     .collect()
+}
+
+fn derive_from_struct(
+    container_attrs: &FromAttrs,
+    subject: &Type,
+    data: &DataStruct,
+    from_self: bool,
+) -> TokenStream2 {
+    let fields = match &data.fields {
+        Fields::Named(fields) => &fields.named,
+        _ => unimplemented!("Only structs with named fields are supported"),
+    };
+
+    let FromAttrs { types } = container_attrs;
+
+    types
+        .iter_with(subject, from_self)
+        .map(|TypeRef{from, to, ..}| {
+            let lines = fields.iter().map(|field| {
+                let name = field.ident.as_ref().unwrap();
+                quote!(#name: value.#name.try_into()?,)
+            });
+            quote! {
+                impl std::convert::From<#from> for #to {
+                    fn from(value: #from) -> #to {
+                        Self {
+                            #(
+                                #lines
+                            )*
+                        }
+                    }
+                }
+            }
+        })
+        .collect()
 }
 
 fn derive_try_from_struct(
@@ -73,7 +116,7 @@ fn derive_try_from_struct(
         .into_iter()
         .map(|field| {
             let attrs = parse_field_attrs(&field.attrs, filter_path)
-                .expect("Parse attributes to find options for `try_from`");
+                .expect("Parse attributes to find field options");
             attrs.check(container_attrs);
             FieldOptions {
                 name: field.ident.as_ref().unwrap(),
@@ -85,16 +128,11 @@ fn derive_try_from_struct(
     let TryFromAttrs { types, err_ty } = container_attrs;
 
     types
-        .into_iter()
-        .map(|(object_key, object)| {
-            let (from, to) = if from_self {
-                (subject, object)
-            } else {
-                (object, subject)
-            };
+        .iter_with(subject, from_self)
+        .map(|TypeRef{key, from, to}| {
             let lines = fields.iter().map(|field| {
                 let name = field.name;
-                match field.attrs.map_for(object_key) {
+                match field.attrs.map_for(key) {
                     Map::Map(expr) => {
                         quote!(#name: (#expr)(value.#name),)
                     }
@@ -134,6 +172,8 @@ fn derive_try_from_struct(
 
 fn derive_convert_enum(
     ContainerAttrs {
+        from,
+        from_self,
         try_from,
         try_from_self,
     }: &ContainerAttrs,
@@ -145,6 +185,12 @@ fn derive_convert_enum(
         path: subject.clone().into(),
     });
     [
+        from
+            .as_ref()
+            .map(|attrs| derive_from_enum(attrs, &subject, data, false)),
+        from_self
+            .as_ref()
+            .map(|attrs| derive_from_enum(attrs, &subject, data, true)),
         try_from
             .as_ref()
             .map(|attrs| derive_try_from_enum(attrs, &subject, data, false)),
@@ -157,14 +203,8 @@ fn derive_convert_enum(
     .collect()
 }
 
-fn derive_try_from_enum(
-    TryFromAttrs { types, err_ty }: &TryFromAttrs,
-    subject: &Type,
-    data: &DataEnum,
-    from_self: bool,
-) -> TokenStream2 {
-    let variants: Vec<_> = data
-        .variants
+fn variants_from_data_enum(data: &DataEnum) -> Vec<&Ident> {
+    data.variants
         .iter()
         .map(|var| {
             if !var.fields.is_empty() {
@@ -172,15 +212,19 @@ fn derive_try_from_enum(
             }
             &var.ident
         })
-        .collect();
+        .collect()
+}
+
+fn derive_try_from_enum(
+    TryFromAttrs { types, err_ty }: &TryFromAttrs,
+    subject: &Type,
+    data: &DataEnum,
+    from_self: bool,
+) -> TokenStream2 {
+    let variants = variants_from_data_enum(data);
     types
-        .values()
-        .map(|object| {
-            let (from, to) = if from_self {
-                (subject, object)
-            } else {
-                (object, subject)
-            };
+        .iter_with(subject, from_self)
+        .map(|TypeRef{from, to, ..}| {
             quote! {
                 impl std::convert::TryFrom<#from> for #to {
                     type Error = #err_ty;
@@ -198,37 +242,107 @@ fn derive_try_from_enum(
         .collect()
 }
 
+fn derive_from_enum(
+    FromAttrs { types }: &FromAttrs,
+    subject: &Type,
+    data: &DataEnum,
+    from_self: bool,
+) -> TokenStream2 {
+    let variants = variants_from_data_enum(data);
+    types
+        .iter_with(subject, from_self)
+        .map(|TypeRef{from, to, ..}| {
+            quote! {
+                impl std::convert::From<#from> for #to {
+                    fn from(value: #from) -> #to {
+                        match value {
+                            #(
+                                #from::#variants => #to::#variants,
+                            )*
+                        }
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
 struct ContainerAttrs {
+    from: Option<FromAttrs>,
+    from_self: Option<FromAttrs>,
     try_from: Option<TryFromAttrs>,
     try_from_self: Option<TryFromAttrs>,
 }
+impl ContainerAttrs {
+    fn is_empty(&self) -> bool {
+        self.from.is_none()
+            && self.from_self.is_none()
+            && self.try_from.is_none()
+            && self.try_from_self.is_none()
+    }
+}
 
 struct TryFromAttrs {
-    types: HashMap<Ident, Type>,
+    types: Types,
     err_ty: Type,
+}
+
+struct FromAttrs {
+    types: Types,
+}
+
+struct Types(HashMap<Ident, Type>);
+
+impl Types {
+    fn iter_with<'a>(&'a self, subject: &'a Type, from_self: bool) -> impl Iterator<Item = TypeRef<'a>> {
+        self.0.iter().map(move |(key, object)| {
+            let (from, to) = if from_self {
+                (subject, object)
+            } else {
+                (object, subject)
+            };
+            TypeRef{key, from, to}
+        })
+    }
+}
+
+struct TypeRef<'a> {
+    key: &'a Ident,
+    from: &'a Type,
+    to: &'a Type,
 }
 
 fn parse_container_attrs(attrs: &[Attribute]) -> Result<ContainerAttrs, ParseAttrsError> {
     let attrs = ContainerAttrs {
+        from: parse_try_from_attrs(attrs, "from")?,
+        from_self: parse_try_from_attrs(attrs, "from_self")?,
         try_from: parse_try_from_attrs(attrs, "try_from")?,
         try_from_self: parse_try_from_attrs(attrs, "try_from_self")?,
     };
-    if attrs.try_from.is_none() && attrs.try_from_self.is_none() {
+    if attrs.is_empty() {
         Err(ParseAttrsError::NothingToImplement)
     } else {
         Ok(attrs)
     }
 }
 
-fn parse_try_from_attrs(
+struct MaybeFromAttrs {
+    types: Types,
+    err_ty: Option<Type>,
+}
+
+fn parse_try_from_attrs<T>(
     attrs: &[Attribute],
     filter_path: &str,
-) -> Result<Option<TryFromAttrs>, ParseAttrsError> {
+) -> Result<Option<T>, ParseAttrsError>
+where
+    MaybeFromAttrs: TryInto<T, Error = ParseAttrsError>,
+{
     let mut types = HashMap::new();
     let mut err_ty = None;
     let iter = attrs
         .into_iter()
-        .filter(|attr| path_eq(&attr.path, filter_path));
+        .filter(|attr| path_eq_convert(&attr.path, filter_path));
 
     let mut attr_is_missing = true;
 
@@ -274,10 +388,27 @@ fn parse_try_from_attrs(
     if types.is_empty() {
         return Err(ParseAttrsError::NoPaths);
     }
-    if let Some(err_ty) = err_ty {
-        Ok(Some(TryFromAttrs { err_ty, types }))
-    } else {
-        Err(ParseAttrsError::NoErrType)
+    Ok(Some(MaybeFromAttrs { err_ty, types: Types(types) }.try_into()?))
+}
+
+impl TryFrom<MaybeFromAttrs> for TryFromAttrs {
+    type Error = ParseAttrsError;
+    fn try_from(MaybeFromAttrs{err_ty, types}: MaybeFromAttrs) -> Result<Self, Self::Error> {
+        if let Some(err_ty) = err_ty {
+            Ok(Self{types, err_ty})
+        } else {
+            Err(ParseAttrsError::NoErrType)
+        }
+    }
+}
+impl TryFrom<MaybeFromAttrs> for FromAttrs {
+    type Error = ParseAttrsError;
+    fn try_from(MaybeFromAttrs{err_ty, types}: MaybeFromAttrs) -> Result<Self, Self::Error> {
+        if let Some(_err_ty) = err_ty {
+            Err(ParseAttrsError::UnnecessaryErrType)
+        } else {
+            Ok(Self { types })
+        }
     }
 }
 
@@ -288,7 +419,7 @@ struct FieldAttrs {
 impl FieldAttrs {
     fn check(&self, container_attrs: &TryFromAttrs) {
         for key in self.map.keys() {
-            if !container_attrs.types.contains_key(key) {
+            if !container_attrs.types.0.contains_key(key) {
                 panic!("There is no such 'try_from' key as {:?}", key);
             }
         }
@@ -321,7 +452,7 @@ fn parse_field_attrs(
     let mut with = None;
     let iter = attrs
         .into_iter()
-        .filter(|attr| path_eq(&attr.path, filter_path));
+        .filter(|attr| path_eq_convert(&attr.path, filter_path));
 
     for attr in iter {
         let meta = attr.parse_meta().map_err(|_| ParseAttrsError::ParseMeta)?;
@@ -374,6 +505,7 @@ enum ParseAttrsError {
     NoPaths,
     DuplicateAttributes,
     NoErrType,
+    UnnecessaryErrType,
     UnsupportedErrLiteral,
     UnsupportedKeyLiteral,
     UnsupportedExpressionLiteral,
@@ -425,6 +557,21 @@ fn path_eq(path: &Path, str: &str) -> bool {
     path.get_ident()
         .map(|ident| ident == str)
         .unwrap_or_default()
+}
+
+fn path_eq_convert(path: &Path, str: &str) -> bool {
+    path_eq(path, str)
+    /*
+    let mut iter = path.segments.iter();
+    matches!(
+        iter.next(),
+        Some(convert) if convert.arguments.is_none() && &convert.ident == "convert"
+    )
+    && matches!(
+        (iter.next(), iter.next()),
+        (Some(segment), None) if segment.arguments.is_none() && &segment.ident == str
+    )
+    */
 }
 
 fn single_meta_from_meta_list(meta_list: &MetaList) -> Result<&Meta, ParseAttrsError> {

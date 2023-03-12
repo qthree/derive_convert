@@ -1,6 +1,6 @@
-use derive_try_from::TryFrom;
+use derive_convert::Convert;
 
-#[derive(TryFrom, PartialEq, Debug)]
+#[derive(Convert, PartialEq, Debug)]
 #[try_from_self(V1 = "Color1", V2 = "v2::Color2", Error = "()")]
 enum Color {
     Red,
