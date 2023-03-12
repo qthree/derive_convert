@@ -22,7 +22,7 @@ mod v2 {
 }
 
 #[test]
-fn test_fry_from() {
+fn try_from_enum() {
     let color1: Color = Color1::Red.try_into().unwrap();
     assert_eq!(color1, Color::Red);
     let color2: Color = v2::Color2::Blue.try_into().unwrap();

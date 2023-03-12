@@ -3,29 +3,35 @@ use std::{convert::Infallible, num::TryFromIntError};
 use derive_try_from::TryFrom;
 
 #[derive(TryFrom, PartialEq, Debug)]
-#[try_from(V1 = "Rect1", V2 = "v2::Rect2", Error = "Error")]
+#[try_from_self(V1 = "Rect1", V2 = "v2::Rect2", Error = "Error")]
 struct Rect {
-    #[try_from(V2(new = "String::new"))]
+    #[try_from_self(V2(skip))]
     tag: String,
     x: i32,
-    #[try_from(V2(default))]
+    #[try_from_self(V1(try_map = "try_some"), V2(skip))]
     y: Option<i32>,
     z: i32,
-    #[try_from(map = "Foo")]
+    #[try_from_self(map = "|foo: Foo<_>| foo.0")]
     width: Foo<i32>,
+    #[try_from_self(try_map = "try_some")]
     height: Option<i32>,
-    #[try_from(
+    #[try_from_self(
         V1(
             try_map = "|vec: Vec<i64>| vec.into_iter().map(|val| val.try_into()).collect::<Result<Vec<i32>, _>>()"
         ),
-        V2(default)
+        V2(skip)
     )]
-    colors: Vec<i32>,
+    colors: Vec<i64>,
+}
+
+fn try_some<T>(opt: Option<T>) -> Result<T, Error> {
+    opt.ok_or(Error::Missing)
 }
 
 #[derive(PartialEq, Debug)]
 struct Foo<T>(T);
 
+#[allow(dead_code)]
 #[derive(PartialEq, Debug)]
 struct Rect1 {
     tag: String,
@@ -34,10 +40,10 @@ struct Rect1 {
     z: i64,
     width: i32,
     height: i32,
-    colors: Vec<i64>,
-    _other1: i32,
+    colors: Vec<i32>,
 }
 
+#[allow(dead_code)]
 mod v2 {
     #[derive(PartialEq, Debug)]
     pub(super) struct Rect2 {
@@ -45,13 +51,13 @@ mod v2 {
         pub(super) z: i128,
         pub(super) width: i32,
         pub(super) height: i32,
-        pub(super) _other2: i32,
     }
 }
 
 #[derive(Debug)]
 enum Error {
     TryFromInt,
+    Missing,
 }
 
 impl From<Infallible> for Error {
@@ -67,7 +73,7 @@ impl From<TryFromIntError> for Error {
 }
 
 #[test]
-fn try_from_struct_1() {
+fn try_from_self_struct_1() {
     let rect = Rect {
         tag: "foo".into(),
         x: 1,
@@ -85,13 +91,12 @@ fn try_from_struct_1() {
         width: 4,
         height: 5,
         colors: vec![6, 7, 8],
-        _other1: 9,
     };
-    assert_eq!(rect, rect1.try_into().unwrap());
+    assert_eq!(Rect1::try_from(rect).unwrap(), rect1);
 }
 
 #[test]
-fn try_from_struct_2() {
+fn try_from_self_struct_2() {
     let rect = Rect {
         tag: "".into(),
         x: 1,
@@ -106,7 +111,6 @@ fn try_from_struct_2() {
         z: 3,
         width: 4,
         height: 5,
-        _other2: 9,
     };
-    assert_eq!(rect, rect2.try_into().unwrap());
+    assert_eq!(v2::Rect2::try_from(rect).unwrap(), rect2);
 }
