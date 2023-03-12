@@ -76,7 +76,7 @@ fn derive_from_struct(
         .map(|TypeRef{from, to, ..}| {
             let lines = fields.iter().map(|field| {
                 let name = field.ident.as_ref().unwrap();
-                quote!(#name: value.#name.try_into()?,)
+                quote!(#name: value.#name.into(),)
             });
             quote! {
                 impl std::convert::From<#from> for #to {

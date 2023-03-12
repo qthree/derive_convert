@@ -20,3 +20,23 @@ enum Color2 {
     Red,
     Blue,
 }
+
+#[derive(Convert)]
+#[from(V1 = "Foo1")]
+#[allow(dead_code)]
+struct Foo {
+    a: i32,
+    b: String,
+}
+
+struct Foo1 {
+    a: i32,
+    b: String,
+}
+
+#[derive(Convert)]
+#[from_self(COMMON = "Foo")]
+struct Foo2 {
+    a: i32,
+    b: String,
+}
