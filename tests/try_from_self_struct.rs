@@ -13,7 +13,7 @@ struct Rect {
     z: i32,
     #[try_from_self(map = "|foo: Foo<_>| foo.0")]
     width: Foo<i32>,
-    #[try_from_self(try_map = "try_some")]
+    #[try_from_self(try_map = "try_some", rename(Height))]
     height: Option<i32>,
     #[try_from_self(
         V1(
@@ -33,24 +33,26 @@ struct Foo<T>(T);
 
 #[allow(dead_code)]
 #[derive(PartialEq, Debug)]
+#[allow(non_snake_case)]
 struct Rect1 {
     tag: String,
     x: i32,
     y: i32,
     z: i64,
     width: i32,
-    height: i32,
+    Height: i32,
     colors: Vec<i32>,
 }
 
 #[allow(dead_code)]
 mod v2 {
     #[derive(PartialEq, Debug)]
+    #[allow(non_snake_case)]
     pub(super) struct Rect2 {
         pub(super) x: i32,
         pub(super) z: i128,
         pub(super) width: i32,
-        pub(super) height: i32,
+        pub(super) Height: i32,
     }
 }
 
@@ -89,7 +91,7 @@ fn try_from_self_struct_1() {
         y: 2,
         z: 3,
         width: 4,
-        height: 5,
+        Height: 5,
         colors: vec![6, 7, 8],
     };
     assert_eq!(Rect1::try_from(rect).unwrap(), rect1);
@@ -110,7 +112,7 @@ fn try_from_self_struct_2() {
         x: 1,
         z: 3,
         width: 4,
-        height: 5,
+        Height: 5,
     };
     assert_eq!(v2::Rect2::try_from(rect).unwrap(), rect2);
 }

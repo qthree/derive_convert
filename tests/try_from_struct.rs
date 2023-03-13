@@ -13,6 +13,7 @@ struct Rect {
     z: i32,
     #[try_from(map = "Foo")]
     width: Foo<i32>,
+    #[try_from(V2(rename("Height")))]
     height: Option<i32>,
     #[try_from(
         V1(
@@ -40,11 +41,12 @@ struct Rect1 {
 
 mod v2 {
     #[derive(PartialEq, Debug)]
+    #[allow(non_snake_case)]
     pub(super) struct Rect2 {
         pub(super) x: i32,
         pub(super) z: i128,
         pub(super) width: i32,
-        pub(super) height: i32,
+        pub(super) Height: i32,
         pub(super) _other2: i32,
     }
 }
@@ -105,7 +107,7 @@ fn try_from_struct_2() {
         x: 1,
         z: 3,
         width: 4,
-        height: 5,
+        Height: 5,
         _other2: 9,
     };
     assert_eq!(rect, rect2.try_into().unwrap());
