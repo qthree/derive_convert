@@ -22,7 +22,7 @@ enum Color2 {
 }
 
 #[derive(Convert)]
-#[from(V1 = "Foo1")]
+#[from(V1("Foo1", ignore("_c")))]
 #[allow(dead_code)]
 struct Foo {
     a: i32,
@@ -32,6 +32,7 @@ struct Foo {
 struct Foo1 {
     a: i32,
     b: String,
+    _c: (),
 }
 
 #[derive(Convert)]

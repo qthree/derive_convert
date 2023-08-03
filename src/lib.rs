@@ -73,24 +73,48 @@ fn derive_from_struct(
 
     types
         .iter_with(subject, from_self)
-        .map(|TypeRef{from, to, ..}| {
+        .map(|TypeRef{from, to, ignores, ..}| {
+            let mut foreign_fields = ignores.to_owned();
             let lines = fields.iter().map(|field| {
                 let name = field.ident.as_ref().unwrap();
+                foreign_fields.push(name.clone());
                 quote!(#name: value.#name.into(),)
             });
+            let lines = quote!(
+                #(
+                    #lines
+                )*
+            );
+            let foreign_fields = quote_foreign_fields(&from, &foreign_fields);
             quote! {
                 impl std::convert::From<#from> for #to {
                     fn from(value: #from) -> #to {
+                        #foreign_fields
                         Self {
-                            #(
-                                #lines
-                            )*
+                            #lines
                         }
                     }
                 }
             }
         })
         .collect()
+}
+
+fn quote_foreign_fields(
+    from: &Type,
+    foreign_fields: &[Ident],
+) -> TokenStream2 {
+    if foreign_fields.is_empty() {
+        quote!()
+    } else {
+        quote!(
+            {
+                let #from { #(
+                    #foreign_fields: _,
+                )* } = &value;
+            }
+        )
+    }
 }
 
 fn derive_try_from_struct(
@@ -129,11 +153,12 @@ fn derive_try_from_struct(
 
     types
         .iter_with(subject, from_self)
-        .map(|TypeRef{key, from, to}| {
+        .map(|TypeRef{key, from, to, ignores}| {
+            let mut foreign_fields = ignores.to_owned();
             let lines = fields.iter().map(|field| {
                 let name = field.name;
-                let namer = FieldNamer{from_self, name};
-                match field.attrs.map_for(key) {
+                let mut namer = FieldNamer{from_self, name, foreign_field: None};
+                let res = match field.attrs.map_for(key) {
                     Map::Map{expr, rename} => {
                         let (this, other) = namer.with(rename);
                         quote!(#this: (#expr)(value.#other),)
@@ -153,19 +178,27 @@ fn derive_try_from_struct(
                         quote!(#name: Default::default(),)
                     }
                     Map::Skip => {
+                        let _ = namer.with(None);
                         quote!()
                     }
-                }
+                };
+                foreign_fields.extend(namer.foreign_field.into_iter().cloned());
+                res
             });
+            let lines = quote!(
+                #(
+                    #lines
+                )*
+            );
+            let foreign_fields = quote_foreign_fields(&from, &foreign_fields);
             quote! {
                 impl std::convert::TryFrom<#from> for #to {
                     type Error = #err_ty;
 
                     fn try_from(value: #from) -> Result<#to, Self::Error> {
+                        #foreign_fields
                         Ok(Self {
-                            #(
-                                #lines
-                            )*
+                            #lines
                         })
                     }
                 }
@@ -177,13 +210,16 @@ fn derive_try_from_struct(
 struct FieldNamer<'a> {
     from_self: bool,
     name: &'a Ident,
+    foreign_field: Option<&'a Ident>,
 }
 impl<'a> FieldNamer<'a> {
-    fn with<I: Into<Option<&'a Ident>>>(&self, rename: I) -> (&'a Ident, &'a Ident) {
+    fn with<I: Into<Option<&'a Ident>>>(&mut self, rename: I) -> (&'a Ident, &'a Ident) {
         if self.from_self {
             (rename.into().unwrap_or(self.name), self.name)
         } else {
-            (self.name, rename.into().unwrap_or(self.name))
+            let rename = rename.into();
+            self.foreign_field = Some(rename.unwrap_or(self.name));
+            (self.name, rename.unwrap_or(self.name))
         }
     }
 }
@@ -309,17 +345,22 @@ struct FromAttrs {
     types: Types,
 }
 
-struct Types(HashMap<Ident, Type>);
+struct Types(HashMap<Ident, AttrType>);
+
+struct AttrType {
+    ty: Type,
+    ignores: Vec<Ident>,
+}
 
 impl Types {
     fn iter_with<'a>(&'a self, subject: &'a Type, from_self: bool) -> impl Iterator<Item = TypeRef<'a>> {
         self.0.iter().map(move |(key, object)| {
             let (from, to) = if from_self {
-                (subject, object)
+                (subject, &object.ty)
             } else {
-                (object, subject)
+                (&object.ty, subject)
             };
-            TypeRef{key, from, to}
+            TypeRef{key, from, to, ignores: &object.ignores}
         })
     }
 }
@@ -328,6 +369,7 @@ struct TypeRef<'a> {
     key: &'a Ident,
     from: &'a Type,
     to: &'a Type,
+    ignores: &'a [Ident],
 }
 
 fn parse_container_attrs(attrs: &[Attribute]) -> Result<ContainerAttrs, ParseAttrsError> {
@@ -387,8 +429,54 @@ where
                                     .ok_or(ParseAttrsError::UnsupportedStructure)?;
                                 let map: Type = lit_parse(&name_value.lit)
                                     .ok_or(ParseAttrsError::UnsupportedKeyLiteral)?;
-                                if let Some(_old_value) = types.insert(key, map) {
+                                if let Some(_old_value) = types.insert(key, AttrType { ty: map, ignores: vec![] }) {
                                     return Err(ParseAttrsError::DuplicateAttributes);
+                                }
+                            }
+                            Meta::List(list) => {
+                                let key = list
+                                    .path
+                                    .get_ident()
+                                    .cloned()
+                                    .ok_or(ParseAttrsError::UnsupportedStructure)?;
+                                let mut map: Option<Type> = None; 
+                                let mut ignores = vec![];
+                                for meta in list.nested {
+                                    match meta {
+                                        NestedMeta::Lit(lit) => {
+                                            if map.replace(lit_parse(&lit)
+                                            .ok_or(ParseAttrsError::UnsupportedKeyLiteral)?).is_some() {
+                                                return Err(ParseAttrsError::DuplicateAttributes);
+                                            }
+                                        }
+                                        NestedMeta::Meta(meta) => {
+                                            match meta {
+                                                Meta::List(list) if path_eq(&list.path, "ignore") => {
+                                                    for nested in list.nested {
+                                                        match nested {
+                                                            NestedMeta::Lit(lit) => {
+                                                                let field: Ident = lit_parse(&lit)
+                                                                    .ok_or(ParseAttrsError::UnsupportedKeyLiteral)?;
+                                                                ignores.push(field);
+                                                            }
+                                                            _ => return Err(ParseAttrsError::UnsupportedStructure),
+                                                        }
+                                                    }
+                                                }
+                                                _ => return Err(ParseAttrsError::UnsupportedStructure),
+                                            }
+                                        }
+                                    }
+                                }
+                                match map {
+                                    None => {
+                                        return Err(ParseAttrsError::UnsupportedStructure);
+                                    }
+                                    Some(map) => {
+                                        if let Some(_old_value) = types.insert(key, AttrType { ty: map, ignores }) {
+                                            return Err(ParseAttrsError::DuplicateAttributes);
+                                        }
+                                    }
                                 }
                             }
                             _ => return Err(ParseAttrsError::UnsupportedStructure),
