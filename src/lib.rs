@@ -4,11 +4,17 @@ use proc_macro::TokenStream;
 use proc_macro2::{Ident, TokenStream as TokenStream2};
 use quote::{quote, ToTokens};
 use syn::{
-    parse::Parse, parse_macro_input, Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr,
-    Fields, Lit, Meta, MetaList, MetaNameValue, NestedMeta, Path, Type, TypePath,
+    parse::Parse, parse_macro_input, Attribute, Data, DeriveInput, Expr, Lit,
+    Meta, MetaList, MetaNameValue, NestedMeta, Path, Type,
 };
 
-#[proc_macro_derive(Convert, attributes(from, from_self, try_from, try_from_self))]
+mod convert_enum;
+mod convert_struct;
+
+#[proc_macro_derive(
+    Convert,
+    attributes(from, from_self, try_from, try_from_self)
+)]
 pub fn derive_convert(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     if !input.generics.params.is_empty() {
@@ -18,92 +24,22 @@ pub fn derive_convert(input: TokenStream) -> TokenStream {
         .expect("Parse attributes to find paths from `try_from`");
 
     match &input.data {
-        Data::Struct(data) => derive_convert_struct(&container_attrs, &input.ident, data),
-        Data::Enum(data) => derive_convert_enum(&container_attrs, &input.ident, data),
+        Data::Struct(data) => convert_struct::derive_convert_struct(
+            &container_attrs,
+            &input.ident,
+            data,
+        ),
+        Data::Enum(data) => convert_enum::derive_convert_enum(
+            &container_attrs,
+            &input.ident,
+            data,
+        ),
         Data::Union(_) => unimplemented!("Unions are not supported!"),
     }
     .into()
 }
 
-fn derive_convert_struct(
-    ContainerAttrs {
-        from,
-        from_self,
-        try_from,
-        try_from_self,
-    }: &ContainerAttrs,
-    subject: &Ident,
-    data: &DataStruct,
-) -> TokenStream2 {
-    let subject = Type::Path(TypePath {
-        qself: None,
-        path: subject.clone().into(),
-    });
-    [
-        from
-            .as_ref()
-            .map(|attrs| derive_from_struct(attrs, &subject, data, false)),
-        from_self
-            .as_ref()
-            .map(|attrs| derive_from_struct(attrs, &subject, data, true)),
-        try_from
-            .as_ref()
-            .map(|attrs| derive_try_from_struct(attrs, &subject, data, false)),
-        try_from_self
-            .as_ref()
-            .map(|attrs| derive_try_from_struct(attrs, &subject, data, true)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
-fn derive_from_struct(
-    container_attrs: &FromAttrs,
-    subject: &Type,
-    data: &DataStruct,
-    from_self: bool,
-) -> TokenStream2 {
-    let fields = match &data.fields {
-        Fields::Named(fields) => &fields.named,
-        _ => unimplemented!("Only structs with named fields are supported"),
-    };
-
-    let FromAttrs { types } = container_attrs;
-
-    types
-        .iter_with(subject, from_self)
-        .map(|TypeRef{from, to, ignores, ..}| {
-            let mut foreign_fields = ignores.to_owned();
-            let lines = fields.iter().map(|field| {
-                let name = field.ident.as_ref().unwrap();
-                foreign_fields.push(name.clone());
-                quote!(#name: value.#name.into(),)
-            });
-            let lines = quote!(
-                #(
-                    #lines
-                )*
-            );
-            let foreign_fields = quote_foreign_fields(from, &foreign_fields);
-            quote! {
-                impl std::convert::From<#from> for #to {
-                    fn from(value: #from) -> #to {
-                        #foreign_fields
-                        Self {
-                            #lines
-                        }
-                    }
-                }
-            }
-        })
-        .collect()
-}
-
-fn quote_foreign_fields(
-    from: &Type,
-    foreign_fields: &[Ident],
-) -> TokenStream2 {
+fn quote_foreign_fields(from: &Type, foreign_fields: &[Ident]) -> TokenStream2 {
     if foreign_fields.is_empty() {
         quote!()
     } else {
@@ -117,103 +53,16 @@ fn quote_foreign_fields(
     }
 }
 
-fn derive_try_from_struct(
-    container_attrs: &TryFromAttrs,
-    subject: &Type,
-    data: &DataStruct,
-    from_self: bool,
-) -> TokenStream2 {
-    let fields = match &data.fields {
-        Fields::Named(fields) => &fields.named,
-        _ => unimplemented!("Only structs with named fields are supported"),
-    };
-    struct FieldOptions<'a> {
-        name: &'a Ident,
-        attrs: FieldAttrs,
-    }
-    let filter_path = if from_self {
-        "try_from_self"
-    } else {
-        "try_from"
-    };
-    let fields: Vec<_> = fields
-        .into_iter()
-        .map(|field| {
-            let attrs = parse_field_attrs(&field.attrs, filter_path)
-                .expect("Parse attributes to find field options");
-            attrs.check(container_attrs);
-            FieldOptions {
-                name: field.ident.as_ref().unwrap(),
-                attrs,
-            }
-        })
-        .collect();
-
-    let TryFromAttrs { types, err_ty } = container_attrs;
-
-    types
-        .iter_with(subject, from_self)
-        .map(|TypeRef{key, from, to, ignores}| {
-            let mut foreign_fields = ignores.to_owned();
-            let lines = fields.iter().map(|field| {
-                let name = field.name;
-                let mut namer = FieldNamer{from_self, name, foreign_field: None};
-                let res = match field.attrs.map_for(key) {
-                    FieldOp::Map{expr, rename, map_ref} => {
-                        let (this, other) = namer.with(rename);
-                        quote!(#this: (#expr)(#map_ref value.#other),)
-                    }
-                    FieldOp::TryMap{expr, rename, map_ref} => {
-                        let (this, other) = namer.with(rename);
-                        quote!(#this: (#expr)(#map_ref value.#other)?,)
-                    }
-                    FieldOp::New(expr) => {
-                        quote!(#name: (#expr)(),)
-                    }
-                    FieldOp::TryInto{rename} => {
-                        let (this, other) = namer.with(rename);
-                        quote!(#this: value.#other.try_into()?,)
-                    }
-                    FieldOp::Defualt => {
-                        quote!(#name: Default::default(),)
-                    }
-                    FieldOp::Skip => {
-                        let _ = namer.with(None);
-                        quote!()
-                    }
-                };
-                foreign_fields.extend(namer.foreign_field.into_iter().cloned());
-                res
-            });
-            let lines = quote!(
-                #(
-                    #lines
-                )*
-            );
-            let foreign_fields = quote_foreign_fields(from, &foreign_fields);
-            quote! {
-                impl std::convert::TryFrom<#from> for #to {
-                    type Error = #err_ty;
-
-                    fn try_from(value: #from) -> Result<#to, Self::Error> {
-                        #foreign_fields
-                        Ok(Self {
-                            #lines
-                        })
-                    }
-                }
-            }
-        })
-        .collect()
-}
-
 struct FieldNamer<'a> {
     from_self: bool,
     name: &'a Ident,
     foreign_field: Option<&'a Ident>,
 }
 impl<'a> FieldNamer<'a> {
-    fn with<I: Into<Option<&'a Ident>>>(&mut self, rename: I) -> (&'a Ident, &'a Ident) {
+    fn with<I: Into<Option<&'a Ident>>>(
+        &mut self,
+        rename: I,
+    ) -> (&'a Ident, &'a Ident) {
         if self.from_self {
             (rename.into().unwrap_or(self.name), self.name)
         } else {
@@ -222,103 +71,6 @@ impl<'a> FieldNamer<'a> {
             (self.name, rename.unwrap_or(self.name))
         }
     }
-}
-
-fn derive_convert_enum(
-    ContainerAttrs {
-        from,
-        from_self,
-        try_from,
-        try_from_self,
-    }: &ContainerAttrs,
-    subject: &Ident,
-    data: &DataEnum,
-) -> TokenStream2 {
-    let subject = Type::Path(TypePath {
-        qself: None,
-        path: subject.clone().into(),
-    });
-    [
-        from
-            .as_ref()
-            .map(|attrs| derive_from_enum(attrs, &subject, data, false)),
-        from_self
-            .as_ref()
-            .map(|attrs| derive_from_enum(attrs, &subject, data, true)),
-        try_from
-            .as_ref()
-            .map(|attrs| derive_try_from_enum(attrs, &subject, data, false)),
-        try_from_self
-            .as_ref()
-            .map(|attrs| derive_try_from_enum(attrs, &subject, data, true)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
-fn variants_from_data_enum(data: &DataEnum) -> Vec<&Ident> {
-    data.variants
-        .iter()
-        .map(|var| {
-            if !var.fields.is_empty() {
-                unimplemented!("Only C-like enums are supported")
-            }
-            &var.ident
-        })
-        .collect()
-}
-
-fn derive_try_from_enum(
-    TryFromAttrs { types, err_ty }: &TryFromAttrs,
-    subject: &Type,
-    data: &DataEnum,
-    from_self: bool,
-) -> TokenStream2 {
-    let variants = variants_from_data_enum(data);
-    types
-        .iter_with(subject, from_self)
-        .map(|TypeRef{from, to, ..}| {
-            quote! {
-                impl std::convert::TryFrom<#from> for #to {
-                    type Error = #err_ty;
-
-                    fn try_from(value: #from) -> Result<#to, Self::Error> {
-                        Ok(match value {
-                            #(
-                                #from::#variants => #to::#variants,
-                            )*
-                        })
-                    }
-                }
-            }
-        })
-        .collect()
-}
-
-fn derive_from_enum(
-    FromAttrs { types }: &FromAttrs,
-    subject: &Type,
-    data: &DataEnum,
-    from_self: bool,
-) -> TokenStream2 {
-    let variants = variants_from_data_enum(data);
-    types
-        .iter_with(subject, from_self)
-        .map(|TypeRef{from, to, ..}| {
-            quote! {
-                impl std::convert::From<#from> for #to {
-                    fn from(value: #from) -> #to {
-                        match value {
-                            #(
-                                #from::#variants => #to::#variants,
-                            )*
-                        }
-                    }
-                }
-            }
-        })
-        .collect()
 }
 
 struct ContainerAttrs {
@@ -353,14 +105,23 @@ struct AttrType {
 }
 
 impl Types {
-    fn iter_with<'a>(&'a self, subject: &'a Type, from_self: bool) -> impl Iterator<Item = TypeRef<'a>> {
+    fn iter_with<'a>(
+        &'a self,
+        subject: &'a Type,
+        from_self: bool,
+    ) -> impl Iterator<Item = TypeRef<'a>> {
         self.0.iter().map(move |(key, object)| {
             let (from, to) = if from_self {
                 (subject, &object.ty)
             } else {
                 (&object.ty, subject)
             };
-            TypeRef{key, from, to, ignores: &object.ignores}
+            TypeRef {
+                key,
+                from,
+                to,
+                ignores: &object.ignores,
+            }
         })
     }
 }
@@ -372,7 +133,9 @@ struct TypeRef<'a> {
     ignores: &'a [Ident],
 }
 
-fn parse_container_attrs(attrs: &[Attribute]) -> Result<ContainerAttrs, ParseAttrsError> {
+fn parse_container_attrs(
+    attrs: &[Attribute],
+) -> Result<ContainerAttrs, ParseAttrsError> {
     let attrs = ContainerAttrs {
         from: parse_try_from_attrs(attrs, "from")?,
         from_self: parse_try_from_attrs(attrs, "from_self")?,
@@ -414,11 +177,17 @@ where
                 for nested in list.nested {
                     match nested {
                         NestedMeta::Meta(nested_meta) => match nested_meta {
-                            Meta::NameValue(name_value) if path_eq(&name_value.path, "Error") => {
+                            Meta::NameValue(name_value)
+                                if path_eq(&name_value.path, "Error") =>
+                            {
                                 let err: Type = lit_parse(&name_value.lit)
-                                    .ok_or(ParseAttrsError::UnsupportedErrLiteral)?;
+                                    .ok_or(
+                                        ParseAttrsError::UnsupportedErrLiteral,
+                                    )?;
                                 if let Some(_old_err) = err_ty.replace(err) {
-                                    return Err(ParseAttrsError::DuplicateAttributes);
+                                    return Err(
+                                        ParseAttrsError::DuplicateAttributes,
+                                    );
                                 }
                             }
                             Meta::NameValue(name_value) => {
@@ -426,20 +195,31 @@ where
                                     .path
                                     .get_ident()
                                     .cloned()
-                                    .ok_or(ParseAttrsError::UnsupportedStructure)?;
+                                    .ok_or(
+                                        ParseAttrsError::UnsupportedStructure,
+                                    )?;
                                 let map: Type = lit_parse(&name_value.lit)
-                                    .ok_or(ParseAttrsError::UnsupportedKeyLiteral)?;
-                                if let Some(_old_value) = types.insert(key, AttrType { ty: map, ignores: vec![] }) {
-                                    return Err(ParseAttrsError::DuplicateAttributes);
+                                    .ok_or(
+                                        ParseAttrsError::UnsupportedKeyLiteral,
+                                    )?;
+                                if let Some(_old_value) = types.insert(
+                                    key,
+                                    AttrType {
+                                        ty: map,
+                                        ignores: vec![],
+                                    },
+                                ) {
+                                    return Err(
+                                        ParseAttrsError::DuplicateAttributes,
+                                    );
                                 }
                             }
                             Meta::List(list) => {
-                                let key = list
-                                    .path
-                                    .get_ident()
-                                    .cloned()
-                                    .ok_or(ParseAttrsError::UnsupportedStructure)?;
-                                let mut map: Option<Type> = None; 
+                                let key =
+                                    list.path.get_ident().cloned().ok_or(
+                                        ParseAttrsError::UnsupportedStructure,
+                                    )?;
+                                let mut map: Option<Type> = None;
                                 let mut ignores = vec![];
                                 for meta in list.nested {
                                     match meta {
@@ -473,13 +253,20 @@ where
                                         return Err(ParseAttrsError::UnsupportedStructure);
                                     }
                                     Some(map) => {
-                                        if let Some(_old_value) = types.insert(key, AttrType { ty: map, ignores }) {
+                                        if let Some(_old_value) = types.insert(
+                                            key,
+                                            AttrType { ty: map, ignores },
+                                        ) {
                                             return Err(ParseAttrsError::DuplicateAttributes);
                                         }
                                     }
                                 }
                             }
-                            _ => return Err(ParseAttrsError::UnsupportedStructure),
+                            _ => {
+                                return Err(
+                                    ParseAttrsError::UnsupportedStructure,
+                                );
+                            }
                         },
                         _ => return Err(ParseAttrsError::UnsupportedStructure),
                     }
@@ -494,14 +281,23 @@ where
     if types.is_empty() {
         return Err(ParseAttrsError::NoPaths);
     }
-    Ok(Some(MaybeFromAttrs { err_ty, types: Types(types) }.try_into()?))
+    Ok(Some(
+        MaybeFromAttrs {
+            err_ty,
+            types: Types(types),
+        }
+        .try_into()?,
+    ))
 }
 
 impl TryFrom<MaybeFromAttrs> for TryFromAttrs {
     type Error = ParseAttrsError;
-    fn try_from(MaybeFromAttrs{err_ty, types}: MaybeFromAttrs) -> Result<Self, Self::Error> {
+
+    fn try_from(
+        MaybeFromAttrs { err_ty, types }: MaybeFromAttrs,
+    ) -> Result<Self, Self::Error> {
         if let Some(err_ty) = err_ty {
-            Ok(Self{types, err_ty})
+            Ok(Self { types, err_ty })
         } else {
             Err(ParseAttrsError::NoErrType)
         }
@@ -509,7 +305,10 @@ impl TryFrom<MaybeFromAttrs> for TryFromAttrs {
 }
 impl TryFrom<MaybeFromAttrs> for FromAttrs {
     type Error = ParseAttrsError;
-    fn try_from(MaybeFromAttrs{err_ty, types}: MaybeFromAttrs) -> Result<Self, Self::Error> {
+
+    fn try_from(
+        MaybeFromAttrs { err_ty, types }: MaybeFromAttrs,
+    ) -> Result<Self, Self::Error> {
         if let Some(_err_ty) = err_ty {
             Err(ParseAttrsError::UnnecessaryErrType)
         } else {
@@ -530,6 +329,7 @@ impl FieldAttrs {
             }
         }
     }
+
     fn map_for(&self, key: &Ident) -> &FieldOp {
         if let Some(map) = self.map.get(key) {
             map
@@ -558,10 +358,20 @@ impl ToTokens for MapRef {
 }
 
 enum FieldOp {
-    Map{expr: MapType, rename: Option<Ident>, map_ref: MapRef },
-    TryMap{expr: MapType, rename: Option<Ident>, map_ref: MapRef },
+    Map {
+        expr: MapType,
+        rename: Option<Ident>,
+        map_ref: MapRef,
+    },
+    TryMap {
+        expr: MapType,
+        rename: Option<Ident>,
+        map_ref: MapRef,
+    },
     New(MapType),
-    TryInto{rename: Option<Ident>},
+    TryInto {
+        rename: Option<Ident>,
+    },
     Defualt,
     Skip,
 }
@@ -573,9 +383,14 @@ impl Default for FieldOp {
 }
 
 impl FieldOp {
-    fn rename(mut self, rename_to: Option<Ident>) -> Result<Self, ParseAttrsError> {
+    fn rename(
+        mut self,
+        rename_to: Option<Ident>,
+    ) -> Result<Self, ParseAttrsError> {
         match &mut self {
-            Self::Map {rename, ..} | Self::TryMap { rename, .. } | Self::TryInto { rename } => {
+            Self::Map { rename, .. }
+            | Self::TryMap { rename, .. }
+            | Self::TryInto { rename } => {
                 *rename = rename_to;
                 Ok(self)
             }
@@ -602,39 +417,52 @@ fn parse_field_attrs(
             Meta::List(list) => {
                 for nested in list.nested {
                     match nested {
-                        NestedMeta::Meta(nested_meta) => match nested_meta {
-                            Meta::NameValue(name_value) => {
-                                if let Some(_old_with) =
-                                    with.replace(map_from_name_value(&name_value)?)
-                                {
-                                    return Err(ParseAttrsError::DuplicateAttributes);
+                        NestedMeta::Meta(nested_meta) => {
+                            match nested_meta {
+                                Meta::NameValue(name_value) => {
+                                    if let Some(_old_with) = with.replace(
+                                        map_from_name_value(&name_value)?,
+                                    ) {
+                                        return Err(ParseAttrsError::DuplicateAttributes);
+                                    }
                                 }
-                            }
-                            Meta::Path(path) => {
-                                if let Some(_old_with) = with.replace(map_from_path(&path)?) {
-                                    return Err(ParseAttrsError::DuplicateAttributes);
+                                Meta::Path(path) => {
+                                    if let Some(_old_with) =
+                                        with.replace(map_from_path(&path)?)
+                                    {
+                                        return Err(ParseAttrsError::DuplicateAttributes);
+                                    }
                                 }
-                            }
-                            Meta::List(list) => {
-                                if let Some(key) = list.path.get_ident().cloned() {
-                                    if &key == "rename" {
-                                        let ident = single_ident_from_meta_list(&list)?;
-                                        if let Some(_old_rename) =
-                                            with_rename.replace(ident.clone())
-                                        {
-                                            return Err(ParseAttrsError::DuplicateAttributes);
+                                Meta::List(list) => {
+                                    if let Some(key) =
+                                        list.path.get_ident().cloned()
+                                    {
+                                        if &key == "rename" {
+                                            let ident =
+                                                single_ident_from_meta_list(
+                                                    &list,
+                                                )?;
+                                            if let Some(_old_rename) =
+                                                with_rename
+                                                    .replace(ident.clone())
+                                            {
+                                                return Err(ParseAttrsError::DuplicateAttributes);
+                                            }
+                                        } else {
+                                            let with =
+                                                map_from_meta_list(&list)?;
+                                            if let Some(_old_value) =
+                                                map.insert(key, with)
+                                            {
+                                                return Err(ParseAttrsError::DuplicateAttributes);
+                                            }
                                         }
                                     } else {
-                                        let with = map_from_meta_list(&list)?;
-                                        if let Some(_old_value) = map.insert(key, with) {
-                                            return Err(ParseAttrsError::DuplicateAttributes);
-                                        }
+                                        return Err(ParseAttrsError::UnsupportedStructure);
                                     }
-                                } else {
-                                    return Err(ParseAttrsError::UnsupportedStructure);
                                 }
                             }
-                        },
+                        }
                         _ => return Err(ParseAttrsError::UnsupportedStructure),
                     }
                 }
@@ -665,20 +493,46 @@ enum ParseAttrsError {
     CantRename,
 }
 
-fn map_from_name_value(name_value: &MetaNameValue) -> Result<FieldOp, ParseAttrsError> {
+fn map_from_name_value(
+    name_value: &MetaNameValue,
+) -> Result<FieldOp, ParseAttrsError> {
     let ident = name_value
         .path
         .get_ident()
         .ok_or(ParseAttrsError::UnsupportedStructure)?;
-    let expr: Expr =
-        lit_parse(&name_value.lit).ok_or(ParseAttrsError::UnsupportedExpressionLiteral)?;
+    let expr: Expr = lit_parse(&name_value.lit)
+        .ok_or(ParseAttrsError::UnsupportedExpressionLiteral)?;
     Ok(match ident.to_string().as_str() {
-        "map" => FieldOp::Map{expr, rename: None, map_ref: MapRef::Owned},
-        "map_ref" => FieldOp::Map{expr, rename: None, map_ref: MapRef::Ref},
-        "map_mut" => FieldOp::Map{expr, rename: None, map_ref: MapRef::Mut},
-        "try_map" => FieldOp::TryMap{expr, rename: None, map_ref: MapRef::Owned},
-        "try_map_ref" => FieldOp::TryMap{expr, rename: None, map_ref: MapRef::Ref},
-        "try_map_mut" => FieldOp::TryMap{expr, rename: None, map_ref: MapRef::Mut},
+        "map" => FieldOp::Map {
+            expr,
+            rename: None,
+            map_ref: MapRef::Owned,
+        },
+        "map_ref" => FieldOp::Map {
+            expr,
+            rename: None,
+            map_ref: MapRef::Ref,
+        },
+        "map_mut" => FieldOp::Map {
+            expr,
+            rename: None,
+            map_ref: MapRef::Mut,
+        },
+        "try_map" => FieldOp::TryMap {
+            expr,
+            rename: None,
+            map_ref: MapRef::Owned,
+        },
+        "try_map_ref" => FieldOp::TryMap {
+            expr,
+            rename: None,
+            map_ref: MapRef::Ref,
+        },
+        "try_map_mut" => FieldOp::TryMap {
+            expr,
+            rename: None,
+            map_ref: MapRef::Mut,
+        },
         "new" => FieldOp::New(expr),
         _ => return Err(ParseAttrsError::UnsupportedNameValue),
     })
@@ -697,22 +551,22 @@ fn map_from_path(path: &Path) -> Result<FieldOp, ParseAttrsError> {
     })
 }
 
-fn map_from_meta_list(meta_list: &MetaList) -> Result<FieldOp, ParseAttrsError> {
+fn map_from_meta_list(
+    meta_list: &MetaList,
+) -> Result<FieldOp, ParseAttrsError> {
     let mut map = None;
     let mut rename = None;
     for nested in &meta_list.nested {
         match nested {
-            NestedMeta::Meta(meta) => {
-                match kv_from_meta(meta)? {
-                    KeyValue::Map(value) => {
-                        if let Some(_old_value) = map.replace(value) {
-                            return Err(ParseAttrsError::UnsupportedStructure);
-                        }
+            NestedMeta::Meta(meta) => match kv_from_meta(meta)? {
+                KeyValue::Map(value) => {
+                    if let Some(_old_value) = map.replace(value) {
+                        return Err(ParseAttrsError::UnsupportedStructure);
                     }
-                    KeyValue::Rename(value) => {
-                        if let Some(_old_value) = rename.replace(value) {
-                            return Err(ParseAttrsError::DuplicateAttributes);
-                        }
+                }
+                KeyValue::Rename(value) => {
+                    if let Some(_old_value) = rename.replace(value) {
+                        return Err(ParseAttrsError::DuplicateAttributes);
                     }
                 }
             },
@@ -745,9 +599,9 @@ fn kv_from_meta(meta: &Meta) -> Result<KeyValue, ParseAttrsError> {
 
 fn ident_from_meta(meta: &Meta) -> Result<&Ident, ParseAttrsError> {
     match meta {
-        Meta::Path(path) => {
-            path.get_ident().ok_or(ParseAttrsError::UnsupportedStructure)
-        },
+        Meta::Path(path) => path
+            .get_ident()
+            .ok_or(ParseAttrsError::UnsupportedStructure),
         _ => Err(ParseAttrsError::UnsupportedStructure),
     }
 }
@@ -773,7 +627,9 @@ fn path_eq_convert(path: &Path, str: &str) -> bool {
     */
 }
 
-fn _single_meta_from_meta_list(meta_list: &MetaList) -> Result<&Meta, ParseAttrsError> {
+fn _single_meta_from_meta_list(
+    meta_list: &MetaList,
+) -> Result<&Meta, ParseAttrsError> {
     if meta_list.nested.len() != 1 {
         return Err(ParseAttrsError::UnsupportedStructure);
     }
@@ -784,14 +640,18 @@ fn _single_meta_from_meta_list(meta_list: &MetaList) -> Result<&Meta, ParseAttrs
     }
 }
 
-fn single_ident_from_meta_list(meta_list: &MetaList) -> Result<Ident, ParseAttrsError> {
+fn single_ident_from_meta_list(
+    meta_list: &MetaList,
+) -> Result<Ident, ParseAttrsError> {
     if meta_list.nested.len() != 1 {
         return Err(ParseAttrsError::UnsupportedStructure);
     }
     let nested_meta = meta_list.nested.iter().next().unwrap();
     Ok(match nested_meta {
         NestedMeta::Meta(nested_meta) => ident_from_meta(nested_meta)?.clone(),
-        NestedMeta::Lit(lit) => lit_parse(lit).ok_or(ParseAttrsError::UnsupportedStructure)?,
+        NestedMeta::Lit(lit) => {
+            lit_parse(lit).ok_or(ParseAttrsError::UnsupportedStructure)?
+        }
     })
 }
 

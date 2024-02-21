@@ -38,8 +38,7 @@ impl TryFrom<&Bar> for String {
 }
 
 #[derive(Debug)]
-enum Error {
-}
+enum Error {}
 
 impl From<Infallible> for Error {
     fn from(value: Infallible) -> Self {
