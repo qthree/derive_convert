@@ -126,6 +126,7 @@ impl Types {
     }
 }
 
+#[derive(Clone, Copy)]
 struct TypeRef<'a> {
     key: &'a Ident,
     from: &'a Type,
@@ -317,20 +318,20 @@ impl TryFrom<MaybeFromAttrs> for FromAttrs {
     }
 }
 
-struct FieldAttrs {
-    map: HashMap<Ident, FieldOp>,
-    with: FieldOp,
+struct FieldAttrs<FO> {
+    map: HashMap<Ident, FO>,
+    with: FO,
 }
-impl FieldAttrs {
-    fn check(&self, container_attrs: &TryFromAttrs) {
+impl<FO> FieldAttrs<FO> {
+    fn check(&self, types: &Types) {
         for key in self.map.keys() {
-            if !container_attrs.types.0.contains_key(key) {
+            if !types.0.contains_key(key) {
                 panic!("There is no such 'try_from' key as {:?}", key);
             }
         }
     }
 
-    fn map_for(&self, key: &Ident) -> &FieldOp {
+    fn map_for(&self, key: &Ident) -> &FO {
         if let Some(map) = self.map.get(key) {
             map
         } else {
@@ -357,53 +358,22 @@ impl ToTokens for MapRef {
     }
 }
 
-enum FieldOp {
-    Map {
-        expr: MapType,
-        rename: Option<Ident>,
-        map_ref: MapRef,
-    },
-    TryMap {
-        expr: MapType,
-        rename: Option<Ident>,
-        map_ref: MapRef,
-    },
-    New(MapType),
-    TryInto {
-        rename: Option<Ident>,
-    },
-    Defualt,
-    Skip,
+trait FieldOp: Sized + Default {
+    fn rename(self, rename_to: Option<Ident>) -> Result<Self, ParseAttrsError>;
+
+    fn map_from_name_value(
+        name_value: &MetaNameValue,
+    ) -> Result<Self, ParseAttrsError>;
+
+    fn map_from_path(path: &Path) -> Result<Self, ParseAttrsError>;
+
+    fn quote<'a>(&'a self, namer: &mut FieldNamer<'a>) -> TokenStream2;
 }
 
-impl Default for FieldOp {
-    fn default() -> Self {
-        FieldOp::TryInto { rename: None }
-    }
-}
-
-impl FieldOp {
-    fn rename(
-        mut self,
-        rename_to: Option<Ident>,
-    ) -> Result<Self, ParseAttrsError> {
-        match &mut self {
-            Self::Map { rename, .. }
-            | Self::TryMap { rename, .. }
-            | Self::TryInto { rename } => {
-                *rename = rename_to;
-                Ok(self)
-            }
-            _ if rename_to.is_none() => Ok(self),
-            _ => Err(ParseAttrsError::CantRename),
-        }
-    }
-}
-
-fn parse_field_attrs(
+fn parse_field_attrs<FO: FieldOp>(
     attrs: &[Attribute],
     filter_path: &str,
-) -> Result<FieldAttrs, ParseAttrsError> {
+) -> Result<FieldAttrs<FO>, ParseAttrsError> {
     let mut map = HashMap::new();
     let mut with = None;
     let mut with_rename = None;
@@ -421,14 +391,14 @@ fn parse_field_attrs(
                             match nested_meta {
                                 Meta::NameValue(name_value) => {
                                     if let Some(_old_with) = with.replace(
-                                        map_from_name_value(&name_value)?,
+                                        FO::map_from_name_value(&name_value)?,
                                     ) {
                                         return Err(ParseAttrsError::DuplicateAttributes);
                                     }
                                 }
                                 Meta::Path(path) => {
                                     if let Some(_old_with) =
-                                        with.replace(map_from_path(&path)?)
+                                        with.replace(FO::map_from_path(&path)?)
                                     {
                                         return Err(ParseAttrsError::DuplicateAttributes);
                                     }
@@ -493,68 +463,10 @@ enum ParseAttrsError {
     CantRename,
 }
 
-fn map_from_name_value(
-    name_value: &MetaNameValue,
-) -> Result<FieldOp, ParseAttrsError> {
-    let ident = name_value
-        .path
-        .get_ident()
-        .ok_or(ParseAttrsError::UnsupportedStructure)?;
-    let expr: Expr = lit_parse(&name_value.lit)
-        .ok_or(ParseAttrsError::UnsupportedExpressionLiteral)?;
-    Ok(match ident.to_string().as_str() {
-        "map" => FieldOp::Map {
-            expr,
-            rename: None,
-            map_ref: MapRef::Owned,
-        },
-        "map_ref" => FieldOp::Map {
-            expr,
-            rename: None,
-            map_ref: MapRef::Ref,
-        },
-        "map_mut" => FieldOp::Map {
-            expr,
-            rename: None,
-            map_ref: MapRef::Mut,
-        },
-        "try_map" => FieldOp::TryMap {
-            expr,
-            rename: None,
-            map_ref: MapRef::Owned,
-        },
-        "try_map_ref" => FieldOp::TryMap {
-            expr,
-            rename: None,
-            map_ref: MapRef::Ref,
-        },
-        "try_map_mut" => FieldOp::TryMap {
-            expr,
-            rename: None,
-            map_ref: MapRef::Mut,
-        },
-        "new" => FieldOp::New(expr),
-        _ => return Err(ParseAttrsError::UnsupportedNameValue),
-    })
-}
-
-fn map_from_path(path: &Path) -> Result<FieldOp, ParseAttrsError> {
-    let ident = path
-        .get_ident()
-        .ok_or(ParseAttrsError::UnsupportedStructure)?;
-    Ok(if ident == "default" {
-        FieldOp::Defualt
-    } else if ident == "skip" {
-        FieldOp::Skip
-    } else {
-        return Err(ParseAttrsError::UnsupportedPath);
-    })
-}
-
-fn map_from_meta_list(
+fn map_from_meta_list<FO: FieldOp>(
     meta_list: &MetaList,
-) -> Result<FieldOp, ParseAttrsError> {
-    let mut map = None;
+) -> Result<FO, ParseAttrsError> {
+    let mut map = None::<FO>;
     let mut rename = None;
     for nested in &meta_list.nested {
         match nested {
@@ -576,15 +488,17 @@ fn map_from_meta_list(
     map.unwrap_or_default().rename(rename)
 }
 
-enum KeyValue {
+enum KeyValue<FO> {
     Rename(Ident),
-    Map(FieldOp),
+    Map(FO),
 }
 
-fn kv_from_meta(meta: &Meta) -> Result<KeyValue, ParseAttrsError> {
+fn kv_from_meta<FO: FieldOp>(
+    meta: &Meta,
+) -> Result<KeyValue<FO>, ParseAttrsError> {
     Ok(KeyValue::Map(match meta {
-        Meta::NameValue(name_value) => map_from_name_value(name_value)?,
-        Meta::Path(path) => map_from_path(path)?,
+        Meta::NameValue(name_value) => FO::map_from_name_value(name_value)?,
+        Meta::Path(path) => FO::map_from_path(path)?,
         Meta::List(list) => {
             if let Some(key) = list.path.get_ident().cloned() {
                 if &key == "rename" {

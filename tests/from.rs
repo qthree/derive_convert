@@ -27,6 +27,8 @@ enum Color2 {
 struct Foo {
     a: i32,
     b: String,
+    #[from(V1(default))]
+    d: f64,
 }
 
 struct Foo1 {
@@ -40,4 +42,5 @@ struct Foo1 {
 struct Foo2 {
     a: i32,
     b: String,
+    d: f64,
 }
