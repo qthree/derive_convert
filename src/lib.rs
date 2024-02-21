@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, TokenStream as TokenStream2};
-use quote::quote;
+use quote::{quote, ToTokens};
 use syn::{
     parse::Parse, parse_macro_input, Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr,
     Fields, Lit, Meta, MetaList, MetaNameValue, NestedMeta, Path, Type, TypePath,
@@ -85,7 +85,7 @@ fn derive_from_struct(
                     #lines
                 )*
             );
-            let foreign_fields = quote_foreign_fields(&from, &foreign_fields);
+            let foreign_fields = quote_foreign_fields(from, &foreign_fields);
             quote! {
                 impl std::convert::From<#from> for #to {
                     fn from(value: #from) -> #to {
@@ -159,25 +159,25 @@ fn derive_try_from_struct(
                 let name = field.name;
                 let mut namer = FieldNamer{from_self, name, foreign_field: None};
                 let res = match field.attrs.map_for(key) {
-                    Map::Map{expr, rename} => {
+                    FieldOp::Map{expr, rename, map_ref} => {
                         let (this, other) = namer.with(rename);
-                        quote!(#this: (#expr)(value.#other),)
+                        quote!(#this: (#expr)(#map_ref value.#other),)
                     }
-                    Map::TryMap{expr, rename} => {
+                    FieldOp::TryMap{expr, rename, map_ref} => {
                         let (this, other) = namer.with(rename);
-                        quote!(#this: (#expr)(value.#other)?,)
+                        quote!(#this: (#expr)(#map_ref value.#other)?,)
                     }
-                    Map::New(expr) => {
+                    FieldOp::New(expr) => {
                         quote!(#name: (#expr)(),)
                     }
-                    Map::TryInto{rename} => {
+                    FieldOp::TryInto{rename} => {
                         let (this, other) = namer.with(rename);
                         quote!(#this: value.#other.try_into()?,)
                     }
-                    Map::Defualt => {
+                    FieldOp::Defualt => {
                         quote!(#name: Default::default(),)
                     }
-                    Map::Skip => {
+                    FieldOp::Skip => {
                         let _ = namer.with(None);
                         quote!()
                     }
@@ -190,7 +190,7 @@ fn derive_try_from_struct(
                     #lines
                 )*
             );
-            let foreign_fields = quote_foreign_fields(&from, &foreign_fields);
+            let foreign_fields = quote_foreign_fields(from, &foreign_fields);
             quote! {
                 impl std::convert::TryFrom<#from> for #to {
                     type Error = #err_ty;
@@ -401,7 +401,7 @@ where
     let mut types = HashMap::new();
     let mut err_ty = None;
     let iter = attrs
-        .into_iter()
+        .iter()
         .filter(|attr| path_eq_convert(&attr.path, filter_path));
 
     let mut attr_is_missing = true;
@@ -519,8 +519,8 @@ impl TryFrom<MaybeFromAttrs> for FromAttrs {
 }
 
 struct FieldAttrs {
-    map: HashMap<Ident, Map>,
-    with: Map,
+    map: HashMap<Ident, FieldOp>,
+    with: FieldOp,
 }
 impl FieldAttrs {
     fn check(&self, container_attrs: &TryFromAttrs) {
@@ -530,8 +530,8 @@ impl FieldAttrs {
             }
         }
     }
-    fn map_for(&self, key: &Ident) -> &Map {
-        if let Some(map) = self.map.get(&key) {
+    fn map_for(&self, key: &Ident) -> &FieldOp {
+        if let Some(map) = self.map.get(key) {
             map
         } else {
             &self.with
@@ -541,22 +541,38 @@ impl FieldAttrs {
 
 type MapType = Expr;
 
-enum Map {
-    Map{expr: MapType, rename: Option<Ident>},
-    TryMap{expr: MapType, rename: Option<Ident>},
+enum MapRef {
+    Owned,
+    Ref,
+    Mut,
+}
+
+impl ToTokens for MapRef {
+    fn to_tokens(&self, tokens: &mut TokenStream2) {
+        tokens.extend(match self {
+            MapRef::Owned => return,
+            MapRef::Ref => quote!(&),
+            MapRef::Mut => quote!(&mut),
+        });
+    }
+}
+
+enum FieldOp {
+    Map{expr: MapType, rename: Option<Ident>, map_ref: MapRef },
+    TryMap{expr: MapType, rename: Option<Ident>, map_ref: MapRef },
     New(MapType),
     TryInto{rename: Option<Ident>},
     Defualt,
     Skip,
 }
 
-impl Default for Map {
+impl Default for FieldOp {
     fn default() -> Self {
-        Map::TryInto { rename: None }
+        FieldOp::TryInto { rename: None }
     }
 }
 
-impl Map {
+impl FieldOp {
     fn rename(mut self, rename_to: Option<Ident>) -> Result<Self, ParseAttrsError> {
         match &mut self {
             Self::Map {rename, ..} | Self::TryMap { rename, .. } | Self::TryInto { rename } => {
@@ -577,7 +593,7 @@ fn parse_field_attrs(
     let mut with = None;
     let mut with_rename = None;
     let iter = attrs
-        .into_iter()
+        .iter()
         .filter(|attr| path_eq_convert(&attr.path, filter_path));
 
     for attr in iter {
@@ -649,38 +665,39 @@ enum ParseAttrsError {
     CantRename,
 }
 
-fn map_from_name_value(name_value: &MetaNameValue) -> Result<Map, ParseAttrsError> {
+fn map_from_name_value(name_value: &MetaNameValue) -> Result<FieldOp, ParseAttrsError> {
     let ident = name_value
         .path
         .get_ident()
         .ok_or(ParseAttrsError::UnsupportedStructure)?;
     let expr: Expr =
         lit_parse(&name_value.lit).ok_or(ParseAttrsError::UnsupportedExpressionLiteral)?;
-    Ok(if ident == "map" {
-        Map::Map{expr, rename: None}
-    } else if ident == "try_map" {
-        Map::TryMap{expr, rename: None}
-    } else if ident == "new" {
-        Map::New(expr)
-    } else {
-        return Err(ParseAttrsError::UnsupportedNameValue);
+    Ok(match ident.to_string().as_str() {
+        "map" => FieldOp::Map{expr, rename: None, map_ref: MapRef::Owned},
+        "map_ref" => FieldOp::Map{expr, rename: None, map_ref: MapRef::Ref},
+        "map_mut" => FieldOp::Map{expr, rename: None, map_ref: MapRef::Mut},
+        "try_map" => FieldOp::TryMap{expr, rename: None, map_ref: MapRef::Owned},
+        "try_map_ref" => FieldOp::TryMap{expr, rename: None, map_ref: MapRef::Ref},
+        "try_map_mut" => FieldOp::TryMap{expr, rename: None, map_ref: MapRef::Mut},
+        "new" => FieldOp::New(expr),
+        _ => return Err(ParseAttrsError::UnsupportedNameValue),
     })
 }
 
-fn map_from_path(path: &Path) -> Result<Map, ParseAttrsError> {
+fn map_from_path(path: &Path) -> Result<FieldOp, ParseAttrsError> {
     let ident = path
         .get_ident()
         .ok_or(ParseAttrsError::UnsupportedStructure)?;
     Ok(if ident == "default" {
-        Map::Defualt
+        FieldOp::Defualt
     } else if ident == "skip" {
-        Map::Skip
+        FieldOp::Skip
     } else {
         return Err(ParseAttrsError::UnsupportedPath);
     })
 }
 
-fn map_from_meta_list(meta_list: &MetaList) -> Result<Map, ParseAttrsError> {
+fn map_from_meta_list(meta_list: &MetaList) -> Result<FieldOp, ParseAttrsError> {
     let mut map = None;
     let mut rename = None;
     for nested in &meta_list.nested {
@@ -707,7 +724,7 @@ fn map_from_meta_list(meta_list: &MetaList) -> Result<Map, ParseAttrsError> {
 
 enum KeyValue {
     Rename(Ident),
-    Map(Map),
+    Map(FieldOp),
 }
 
 fn kv_from_meta(meta: &Meta) -> Result<KeyValue, ParseAttrsError> {

@@ -11,7 +11,7 @@ struct Rect {
     #[try_from_self(V1(try_map = "try_some"), V2(skip))]
     y: Option<i32>,
     z: i32,
-    #[try_from_self(map = "|foo: Foo<_>| foo.0")]
+    #[try_from_self(map = "|a: Foo<_>| a.0")]
     width: Foo<i32>,
     #[try_from_self(try_map = "try_some", rename(Height))]
     height: Option<i32>,
