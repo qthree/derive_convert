@@ -1,11 +1,11 @@
 use proc_macro2::{Ident, TokenStream as TokenStream2};
 use quote::quote;
-use syn::{DataStruct, Expr, MetaNameValue, Path, Type};
+use syn::{DataStruct, Expr, Type};
 
 use super::AllFieldsOptions;
 use crate::{
-    lit_parse, FieldNamer, FieldOp, MapRef, MapType, ParseAttrsError,
-    TryFromAttrs, TypeRef,
+    FieldNamer, FieldOp, MapRef, MapType, ParseAttrsError, TryFromAttrs,
+    TypeRef,
 };
 
 enum TryFromFieldOp {
@@ -23,7 +23,7 @@ enum TryFromFieldOp {
     TryInto {
         rename: Option<Ident>,
     },
-    Defualt,
+    Default,
     Skip,
 }
 
@@ -50,16 +50,8 @@ impl FieldOp for TryFromFieldOp {
         }
     }
 
-    fn map_from_name_value(
-        name_value: &MetaNameValue,
-    ) -> Result<Self, ParseAttrsError> {
-        let ident = name_value
-            .path
-            .get_ident()
-            .ok_or(ParseAttrsError::UnsupportedStructure)?;
-        let expr: Expr = lit_parse(&name_value.lit)
-            .ok_or(ParseAttrsError::UnsupportedExpressionLiteral)?;
-        Ok(match ident.to_string().as_str() {
+    fn from_key_expr(key: &str, expr: Expr) -> Result<Self, ParseAttrsError> {
+        Ok(match key {
             "map" => Self::Map {
                 expr,
                 rename: None,
@@ -95,16 +87,11 @@ impl FieldOp for TryFromFieldOp {
         })
     }
 
-    fn map_from_path(path: &Path) -> Result<Self, ParseAttrsError> {
-        let ident = path
-            .get_ident()
-            .ok_or(ParseAttrsError::UnsupportedStructure)?;
-        Ok(if ident == "default" {
-            Self::Defualt
-        } else if ident == "skip" {
-            Self::Skip
-        } else {
-            return Err(ParseAttrsError::UnsupportedPath);
+    fn from_key(key: &str) -> Result<Self, ParseAttrsError> {
+        Ok(match key {
+            "default" => Self::Default,
+            "skip" => Self::Skip,
+            _ => return Err(ParseAttrsError::UnsupportedPath),
         })
     }
 
@@ -134,7 +121,7 @@ impl FieldOp for TryFromFieldOp {
                 let (this, other) = namer.with(rename);
                 quote!(#this: value.#other.try_into()?,)
             }
-            TryFromFieldOp::Defualt => {
+            TryFromFieldOp::Default => {
                 quote!(#name: Default::default(),)
             }
             TryFromFieldOp::Skip => {

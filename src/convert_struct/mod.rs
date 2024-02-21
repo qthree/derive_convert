@@ -3,8 +3,8 @@ use quote::quote;
 use syn::{DataStruct, Fields, Type, TypePath};
 
 use crate::{
-    parse_field_attrs, quote_foreign_fields, ContainerAttrs, FieldAttrs,
-    FieldNamer, FieldOp, TypeRef, Types,
+    parse_field_attrs, ContainerAttrs, FieldAttrs, FieldNamer, FieldOp,
+    TypeRef, Types,
 };
 
 mod from;
@@ -77,7 +77,10 @@ impl<'a, FO: FieldOp> AllFieldsOptions<'a, FO> {
         &self,
         from_self: bool,
         TypeRef {
-            key, from, ignores, ..
+            key,
+            from,
+            to,
+            ignores,
         }: TypeRef,
     ) -> (TokenStream2, TokenStream2) {
         let mut foreign_fields = ignores.to_owned();
@@ -87,6 +90,8 @@ impl<'a, FO: FieldOp> AllFieldsOptions<'a, FO> {
                 from_self,
                 name,
                 foreign_field: None,
+                from,
+                to,
             };
             let res = field.attrs.map_for(key).quote(&mut namer);
             foreign_fields.extend(namer.foreign_field.into_iter().cloned());
@@ -99,5 +104,19 @@ impl<'a, FO: FieldOp> AllFieldsOptions<'a, FO> {
         );
         let foreign_fields = quote_foreign_fields(from, &foreign_fields);
         (lines, foreign_fields)
+    }
+}
+
+fn quote_foreign_fields(from: &Type, foreign_fields: &[Ident]) -> TokenStream2 {
+    if foreign_fields.is_empty() {
+        quote!()
+    } else {
+        quote!(
+            {
+                let #from { #(
+                    #foreign_fields: _,
+                )* } = &value;
+            }
+        )
     }
 }

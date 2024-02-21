@@ -2,9 +2,13 @@ mod from;
 mod try_from;
 
 use proc_macro2::{Ident, TokenStream as TokenStream2};
+use quote::quote;
 use syn::{DataEnum, Type, TypePath};
 
-use crate::ContainerAttrs;
+use crate::{
+    parse_field_attrs, ContainerAttrs, FieldAttrs, FieldNamer, FieldOp,
+    TypeRef, Types,
+};
 
 pub(super) fn derive_convert_enum(
     ContainerAttrs {
@@ -38,14 +42,82 @@ pub(super) fn derive_convert_enum(
     .collect()
 }
 
-fn variants_from_data_enum(data: &DataEnum) -> Vec<&Ident> {
-    data.variants
-        .iter()
-        .map(|var| {
-            if !var.fields.is_empty() {
-                unimplemented!("Only C-like enums are supported")
+struct OneVariantOptions<'a, FO> {
+    name: &'a Ident,
+    attrs: FieldAttrs<FO>,
+}
+
+struct AllVariantsOptions<'a, FO> {
+    variants: Vec<OneVariantOptions<'a, FO>>,
+}
+
+impl<'a, FO: FieldOp> AllVariantsOptions<'a, FO> {
+    fn parse(data: &'a DataEnum, filter_path: &str, types: &Types) -> Self {
+        let variants = &data.variants;
+        let variants = variants
+            .into_iter()
+            .map(|variant| {
+                if !variant.fields.is_empty() {
+                    unimplemented!("Only C-like enums are supported");
+                }
+                let attrs = parse_field_attrs(&variant.attrs, filter_path)
+                    .expect("Parse attributes to find field options");
+                attrs.check(types);
+                OneVariantOptions {
+                    name: &variant.ident,
+                    attrs,
+                }
+            })
+            .collect();
+        Self { variants }
+    }
+
+    fn lines_n_fields(
+        &self,
+        from_self: bool,
+        TypeRef {
+            key,
+            from,
+            to,
+            ignores,
+        }: TypeRef,
+    ) -> (TokenStream2, TokenStream2) {
+        let mut foreign_fields = ignores.to_owned();
+        let lines = self.variants.iter().map(|field| {
+            let name = field.name;
+            let mut namer = FieldNamer {
+                from_self,
+                name,
+                foreign_field: None,
+                from,
+                to,
+            };
+            let res = field.attrs.map_for(key).quote(&mut namer);
+            foreign_fields.extend(namer.foreign_field.into_iter().cloned());
+            res
+        });
+        let lines = quote!(
+            #(
+                #lines
+            )*
+        );
+        let foreign_fields = quote_foreign_fields(from, &foreign_fields);
+        (lines, foreign_fields)
+    }
+}
+
+fn quote_foreign_fields(from: &Type, foreign_fields: &[Ident]) -> TokenStream2 {
+    if foreign_fields.is_empty() {
+        quote!()
+    } else {
+        quote!(
+            {
+                match &value {
+                    #(
+                        #from::#foreign_fields => {},
+                    )*
+                }
             }
-            &var.ident
-        })
-        .collect()
+        )
+    }
 }

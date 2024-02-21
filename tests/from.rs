@@ -4,13 +4,16 @@ use derive_convert::Convert;
 #[from(V1 = "Color1")]
 enum Color {
     Red,
+    #[from(V1(rename("Blues")))]
     Blue,
+    #[from(V1(skip))]
+    Green,
 }
 
 #[allow(dead_code)]
 enum Color1 {
     Red,
-    Blue,
+    Blues,
 }
 
 #[derive(Convert)]
@@ -19,6 +22,7 @@ enum Color1 {
 enum Color2 {
     Red,
     Blue,
+    Green,
 }
 
 #[derive(Convert)]
