@@ -27,6 +27,7 @@ enum Color2 {
 
 #[derive(Convert)]
 #[from(V1("Foo1", ignore("_c")))]
+#[from_self(V3("Foo3", default("e")))]
 #[allow(dead_code)]
 struct Foo {
     a: i32,
@@ -47,4 +48,12 @@ struct Foo2 {
     a: i32,
     b: String,
     d: f64,
+}
+
+#[allow(dead_code)]
+struct Foo3 {
+    a: i32,
+    b: String,
+    d: f64,
+    e: Vec<u8>,
 }

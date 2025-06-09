@@ -6,8 +6,8 @@ use quote::quote;
 use syn::{DataEnum, Type, TypePath};
 
 use crate::{
-    parse_field_attrs, ContainerAttrs, FieldAttrs, FieldNamer, FieldOp,
-    TypeRef, Types,
+    ContainerAttrs, FieldAttrs, FieldNamer, FieldOp, TypeRef, Types,
+    parse_field_attrs,
 };
 
 pub(super) fn derive_convert_enum(
@@ -79,10 +79,11 @@ impl<'a, FO: FieldOp> AllVariantsOptions<'a, FO> {
             key,
             from,
             to,
-            ignores,
+            extra_foreign_fields,
         }: TypeRef,
     ) -> (TokenStream2, TokenStream2) {
-        let mut foreign_fields = ignores.to_owned();
+        let mut foreign_fields: Vec<_> =
+            extra_foreign_fields.ignores().cloned().collect();
         let lines = self.variants.iter().map(|field| {
             let name = field.name;
             let mut namer = FieldNamer {

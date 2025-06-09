@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, TokenStream as TokenStream2};
-use quote::{quote, ToTokens};
+use quote::{ToTokens, quote};
 use syn::{
-    parse::Parse, parse_macro_input, Attribute, Data, DeriveInput, Expr, Lit,
-    Meta, MetaList, MetaNameValue, NestedMeta, Path, Type,
+    Attribute, Data, DeriveInput, Expr, Lit, Meta, MetaList, MetaNameValue,
+    NestedMeta, Path, Type, parse::Parse, parse_macro_input,
 };
 
 mod convert_enum;
@@ -87,9 +87,45 @@ struct FromAttrs {
 
 struct Types(HashMap<Ident, AttrType>);
 
+#[derive(Default)]
+struct ForeignFields(HashMap<Ident, ForeignAction>);
+
+impl ForeignFields {
+    fn ignores(&self) -> impl Iterator<Item = &Ident> {
+        self.0
+            .iter()
+            .filter(|(_, f)| matches!(f, ForeignAction::Ignore))
+            .map(|(k, _)| k)
+    }
+
+    fn defaults(&self) -> impl Iterator<Item = &Ident> {
+        self.0
+            .iter()
+            .filter(|(_, f)| matches!(f, ForeignAction::Default))
+            .map(|(k, _)| k)
+    }
+
+    fn insert(
+        &mut self,
+        field: Ident,
+        action: ForeignAction,
+    ) -> Result<(), ParseAttrsError> {
+        if self.0.insert(field, action).is_some() {
+            Err(ParseAttrsError::DuplicateAttributes)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 struct AttrType {
     ty: Type,
-    ignores: Vec<Ident>,
+    extra_foreign_fields: ForeignFields,
+}
+
+enum ForeignAction {
+    Ignore,
+    Default,
 }
 
 impl Types {
@@ -108,7 +144,7 @@ impl Types {
                 key,
                 from,
                 to,
-                ignores: &object.ignores,
+                extra_foreign_fields: &object.extra_foreign_fields,
             }
         })
     }
@@ -119,17 +155,17 @@ struct TypeRef<'a> {
     key: &'a Ident,
     from: &'a Type,
     to: &'a Type,
-    ignores: &'a [Ident],
+    extra_foreign_fields: &'a ForeignFields,
 }
 
 fn parse_container_attrs(
     attrs: &[Attribute],
 ) -> Result<ContainerAttrs, ParseAttrsError> {
     let attrs = ContainerAttrs {
-        from: parse_try_from_attrs(attrs, "from")?,
-        from_self: parse_try_from_attrs(attrs, "from_self")?,
-        try_from: parse_try_from_attrs(attrs, "try_from")?,
-        try_from_self: parse_try_from_attrs(attrs, "try_from_self")?,
+        from: parse_try_from_attrs(attrs, "from", false)?,
+        from_self: parse_try_from_attrs(attrs, "from_self", true)?,
+        try_from: parse_try_from_attrs(attrs, "try_from", false)?,
+        try_from_self: parse_try_from_attrs(attrs, "try_from_self", true)?,
     };
     if attrs.is_empty() {
         Err(ParseAttrsError::NothingToImplement)
@@ -146,6 +182,7 @@ struct MaybeFromAttrs {
 fn parse_try_from_attrs<T>(
     attrs: &[Attribute],
     filter_path: &str,
+    from_self: bool,
 ) -> Result<Option<T>, ParseAttrsError>
 where
     MaybeFromAttrs: TryInto<T, Error = ParseAttrsError>,
@@ -191,13 +228,13 @@ where
                                     .ok_or(
                                         ParseAttrsError::UnsupportedKeyLiteral,
                                     )?;
-                                if let Some(_old_value) = types.insert(
-                                    key,
-                                    AttrType {
+                                if let Some(_old_value) =
+                                    types.insert(key, AttrType {
                                         ty: map,
-                                        ignores: vec![],
-                                    },
-                                ) {
+                                        extra_foreign_fields: Default::default(
+                                        ),
+                                    })
+                                {
                                     return Err(
                                         ParseAttrsError::DuplicateAttributes,
                                     );
@@ -209,7 +246,8 @@ where
                                         ParseAttrsError::UnsupportedStructure,
                                     )?;
                                 let mut map: Option<Type> = None;
-                                let mut ignores = vec![];
+                                let mut extra_foreign_fields =
+                                    ForeignFields::default();
                                 for meta in list.nested {
                                     match meta {
                                         NestedMeta::Lit(lit) => {
@@ -221,12 +259,30 @@ where
                                         NestedMeta::Meta(meta) => {
                                             match meta {
                                                 Meta::List(list) if path_eq(&list.path, "ignore") => {
+                                                    if from_self {
+                                                        return Err(ParseAttrsError::UnsupportedStructure);
+                                                    }
                                                     for nested in list.nested {
                                                         match nested {
                                                             NestedMeta::Lit(lit) => {
                                                                 let field: Ident = lit_parse(&lit)
                                                                     .ok_or(ParseAttrsError::UnsupportedKeyLiteral)?;
-                                                                ignores.push(field);
+                                                                extra_foreign_fields.insert(field, ForeignAction::Ignore)?;
+                                                            }
+                                                            _ => return Err(ParseAttrsError::UnsupportedStructure),
+                                                        }
+                                                    }
+                                                }
+                                                Meta::List(list) if path_eq(&list.path, "default") => {
+                                                    if !from_self {
+                                                        return Err(ParseAttrsError::UnsupportedStructure);
+                                                    }
+                                                    for nested in list.nested {
+                                                        match nested {
+                                                            NestedMeta::Lit(lit) => {
+                                                                let field: Ident = lit_parse(&lit)
+                                                                    .ok_or(ParseAttrsError::UnsupportedKeyLiteral)?;
+                                                                extra_foreign_fields.insert(field, ForeignAction::Default)?;
                                                             }
                                                             _ => return Err(ParseAttrsError::UnsupportedStructure),
                                                         }
@@ -242,10 +298,12 @@ where
                                         return Err(ParseAttrsError::UnsupportedStructure);
                                     }
                                     Some(map) => {
-                                        if let Some(_old_value) = types.insert(
-                                            key,
-                                            AttrType { ty: map, ignores },
-                                        ) {
+                                        if let Some(_old_value) =
+                                            types.insert(key, AttrType {
+                                                ty: map,
+                                                extra_foreign_fields,
+                                            })
+                                        {
                                             return Err(ParseAttrsError::DuplicateAttributes);
                                         }
                                     }

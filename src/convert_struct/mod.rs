@@ -3,8 +3,8 @@ use quote::quote;
 use syn::{DataStruct, Fields, Type, TypePath};
 
 use crate::{
-    parse_field_attrs, ContainerAttrs, FieldAttrs, FieldNamer, FieldOp,
-    TypeRef, Types,
+    ContainerAttrs, FieldAttrs, FieldNamer, FieldOp, TypeRef, Types,
+    parse_field_attrs,
 };
 
 mod from;
@@ -80,10 +80,11 @@ impl<'a, FO: FieldOp> AllFieldsOptions<'a, FO> {
             key,
             from,
             to,
-            ignores,
+            extra_foreign_fields,
         }: TypeRef,
     ) -> (TokenStream2, TokenStream2) {
-        let mut foreign_fields = ignores.to_owned();
+        let mut foreign_fields: Vec<_> =
+            extra_foreign_fields.ignores().cloned().collect();
         let lines = self.fields.iter().map(|field| {
             let name = field.name;
             let mut namer = FieldNamer {
@@ -97,9 +98,15 @@ impl<'a, FO: FieldOp> AllFieldsOptions<'a, FO> {
             foreign_fields.extend(namer.foreign_field.into_iter().cloned());
             res
         });
+        let extra_lines = extra_foreign_fields
+            .defaults()
+            .map(|name| quote!(#name: Default::default(),));
         let lines = quote!(
             #(
                 #lines
+            )*
+            #(
+                #extra_lines
             )*
         );
         let foreign_fields = quote_foreign_fields(from, &foreign_fields);
