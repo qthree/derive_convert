@@ -3,7 +3,10 @@ use quote::quote;
 use syn::{DataEnum, Expr, Ident, Type};
 
 use super::AllVariantsOptions;
-use crate::{FieldNamer, FieldOp, ParseAttrsError, TryFromAttrs, TypeRef, convert_enum::VariantContext};
+use crate::{
+    FieldNamer, FieldOp, ParseAttrsError, TryFromAttrs, TypeRef,
+    convert_enum::VariantContext,
+};
 
 enum TryFromVariantOp {
     Into { rename: Option<Ident> },
@@ -48,7 +51,12 @@ impl FieldOp for TryFromVariantOp {
 
     fn quote<'a>(
         &'a self,
-        namer @ &mut FieldNamer { from, to, context: &VariantContext { has_one_field }, .. }: &mut FieldNamer<'a, VariantContext>,
+        namer @ &mut FieldNamer {
+            from,
+            to,
+            context: &VariantContext { has_one_field },
+            ..
+        }: &mut FieldNamer<'a, VariantContext>,
     ) -> TokenStream2 {
         let name = namer.name;
         match self {

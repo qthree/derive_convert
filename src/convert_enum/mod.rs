@@ -56,7 +56,9 @@ struct AllVariantsOptions<'a, FO> {
     variants: Vec<OneVariantOptions<'a, FO>>,
 }
 
-impl<'a, FO: FieldOp<FieldContext = VariantContext>> AllVariantsOptions<'a, FO> {
+impl<'a, FO: FieldOp<FieldContext = VariantContext>>
+    AllVariantsOptions<'a, FO>
+{
     fn parse(data: &'a DataEnum, filter_path: &str, types: &Types) -> Self {
         let variants = &data.variants;
         let variants = variants

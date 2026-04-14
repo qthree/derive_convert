@@ -229,13 +229,14 @@ where
                                     .ok_or(
                                         ParseAttrsError::UnsupportedKeyLiteral,
                                     )?;
-                                if let Some(_old_value) =
-                                    types.insert(key, AttrType {
+                                if let Some(_old_value) = types.insert(
+                                    key,
+                                    AttrType {
                                         ty: map,
                                         extra_foreign_fields: Default::default(
                                         ),
-                                    })
-                                {
+                                    },
+                                ) {
                                     return Err(
                                         ParseAttrsError::DuplicateAttributes,
                                     );
@@ -299,12 +300,13 @@ where
                                         return Err(ParseAttrsError::UnsupportedStructure);
                                     }
                                     Some(map) => {
-                                        if let Some(_old_value) =
-                                            types.insert(key, AttrType {
+                                        if let Some(_old_value) = types.insert(
+                                            key,
+                                            AttrType {
                                                 ty: map,
                                                 extra_foreign_fields,
-                                            })
-                                        {
+                                            },
+                                        ) {
                                             return Err(ParseAttrsError::DuplicateAttributes);
                                         }
                                     }
@@ -413,7 +415,10 @@ trait FieldOp: Sized + Default {
 
     fn from_key(key: &str) -> Result<Self, ParseAttrsError>;
 
-    fn quote<'a>(&'a self, namer: &mut FieldNamer<'a, Self::FieldContext>) -> TokenStream2;
+    fn quote<'a>(
+        &'a self,
+        namer: &mut FieldNamer<'a, Self::FieldContext>,
+    ) -> TokenStream2;
 }
 
 fn parse_field_attrs<FO: FieldOp>(
