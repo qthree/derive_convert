@@ -3,7 +3,7 @@ use quote::quote;
 use syn::{DataEnum, Expr, Ident, Type};
 
 use super::AllVariantsOptions;
-use crate::{FieldNamer, FieldOp, FromAttrs, ParseAttrsError, TypeRef};
+use crate::{FieldNamer, FieldOp, FromAttrs, ParseAttrsError, TypeRef, convert_enum::VariantContext};
 
 enum FromVariantOp {
     Into { rename: Option<Ident> },
@@ -18,6 +18,8 @@ impl Default for FromVariantOp {
 }
 
 impl FieldOp for FromVariantOp {
+    type FieldContext = VariantContext;
+
     fn rename(
         mut self,
         rename_to: Option<Ident>,
@@ -46,17 +48,27 @@ impl FieldOp for FromVariantOp {
 
     fn quote<'a>(
         &'a self,
-        namer @ &mut FieldNamer { from, to, .. }: &mut FieldNamer<'a>,
+        namer @ &mut FieldNamer { from, to, context: &VariantContext { has_one_field }, .. }: &mut FieldNamer<'a, VariantContext>,
     ) -> TokenStream2 {
         let name = namer.name;
         match self {
             FromVariantOp::Into { rename } => {
                 let (this, other) = namer.with(rename);
-                quote!(#from::#other => #to::#this,)
+
+                if has_one_field {
+                    quote!(#from::#other(___value) => #to::#this(___value.into()),)
+                } else {
+                    quote!(#from::#other => #to::#this,)
+                }
             }
             FromVariantOp::Default => {
                 let _ = namer.with(None);
-                quote!(#from::#name => #to::default(),)
+
+                if has_one_field {
+                    quote!(#from::#name(_) => #to::default(),)
+                } else {
+                    quote!(#from::#name => #to::default(),)
+                }
             }
             FromVariantOp::Skip => {
                 quote!()

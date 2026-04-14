@@ -34,6 +34,8 @@ impl Default for TryFromFieldOp {
 }
 
 impl FieldOp for TryFromFieldOp {
+    type FieldContext = ();
+
     fn rename(
         mut self,
         rename_to: Option<Ident>,

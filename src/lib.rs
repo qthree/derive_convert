@@ -39,14 +39,15 @@ pub fn derive_convert(input: TokenStream) -> TokenStream {
     .into()
 }
 
-struct FieldNamer<'a> {
+struct FieldNamer<'a, C = ()> {
     from_self: bool,
     name: &'a Ident,
     foreign_field: Option<&'a Ident>,
     from: &'a Type,
     to: &'a Type,
+    context: &'a C,
 }
-impl<'a> FieldNamer<'a> {
+impl<'a, C> FieldNamer<'a, C> {
     fn with<I: Into<Option<&'a Ident>>>(
         &mut self,
         rename: I,
@@ -405,13 +406,14 @@ impl ToTokens for MapRef {
 }
 
 trait FieldOp: Sized + Default {
+    type FieldContext;
     fn rename(self, rename_to: Option<Ident>) -> Result<Self, ParseAttrsError>;
 
     fn from_key_expr(key: &str, expr: Expr) -> Result<Self, ParseAttrsError>;
 
     fn from_key(key: &str) -> Result<Self, ParseAttrsError>;
 
-    fn quote<'a>(&'a self, namer: &mut FieldNamer<'a>) -> TokenStream2;
+    fn quote<'a>(&'a self, namer: &mut FieldNamer<'a, Self::FieldContext>) -> TokenStream2;
 }
 
 fn parse_field_attrs<FO: FieldOp>(

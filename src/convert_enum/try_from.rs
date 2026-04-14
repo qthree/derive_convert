@@ -3,7 +3,7 @@ use quote::quote;
 use syn::{DataEnum, Expr, Ident, Type};
 
 use super::AllVariantsOptions;
-use crate::{FieldNamer, FieldOp, ParseAttrsError, TryFromAttrs, TypeRef};
+use crate::{FieldNamer, FieldOp, ParseAttrsError, TryFromAttrs, TypeRef, convert_enum::VariantContext};
 
 enum TryFromVariantOp {
     Into { rename: Option<Ident> },
@@ -18,6 +18,8 @@ impl Default for TryFromVariantOp {
 }
 
 impl FieldOp for TryFromVariantOp {
+    type FieldContext = VariantContext;
+
     fn rename(
         mut self,
         rename_to: Option<Ident>,
@@ -46,17 +48,25 @@ impl FieldOp for TryFromVariantOp {
 
     fn quote<'a>(
         &'a self,
-        namer @ &mut FieldNamer { from, to, .. }: &mut FieldNamer<'a>,
+        namer @ &mut FieldNamer { from, to, context: &VariantContext { has_one_field }, .. }: &mut FieldNamer<'a, VariantContext>,
     ) -> TokenStream2 {
         let name = namer.name;
         match self {
             TryFromVariantOp::Into { rename } => {
                 let (this, other) = namer.with(rename);
-                quote!(#from::#other => #to::#this,)
+                if has_one_field {
+                    quote!(#from::#other(___value) => #to::#this(___value.try_into()?),)
+                } else {
+                    quote!(#from::#other => #to::#this,)
+                }
             }
             TryFromVariantOp::Default => {
                 let _ = namer.with(None);
-                quote!(#from::#name => #to::default(),)
+                if has_one_field {
+                    quote!(#from::#name(_) => #to::default(),)
+                } else {
+                    quote!(#from::#name => #to::default(),)
+                }
             }
             TryFromVariantOp::Skip => {
                 quote!()

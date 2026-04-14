@@ -57,3 +57,25 @@ struct Foo3 {
     d: f64,
     e: Vec<u8>,
 }
+
+#[allow(dead_code)]
+#[derive(Convert)]
+#[from(V1 = "FooColor1")]
+enum FooColor {
+    Foo(Foo),
+    Color(Color),
+}
+
+#[allow(dead_code)]
+enum FooColor1 {
+    Foo(Foo1),
+    Color(Color1),
+}
+
+#[allow(dead_code)]
+#[derive(Convert)]
+#[from_self(COMMON = "FooColor")]
+enum FooColor2 {
+    Foo(Foo2),
+    Color(Color2),
+}

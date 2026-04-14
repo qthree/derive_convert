@@ -52,7 +52,7 @@ struct AllFieldsOptions<'a, FO> {
     fields: Vec<OneFieldOptions<'a, FO>>,
 }
 
-impl<'a, FO: FieldOp> AllFieldsOptions<'a, FO> {
+impl<'a, FO: FieldOp<FieldContext = ()>> AllFieldsOptions<'a, FO> {
     fn parse(fields: &'a Fields, filter_path: &str, types: &Types) -> Self {
         let fields = match fields {
             Fields::Named(fields) => &fields.named,
@@ -93,6 +93,7 @@ impl<'a, FO: FieldOp> AllFieldsOptions<'a, FO> {
                 foreign_field: None,
                 from,
                 to,
+                context: &(),
             };
             let res = field.attrs.map_for(key).quote(&mut namer);
             foreign_fields.extend(namer.foreign_field.into_iter().cloned());

@@ -28,6 +28,8 @@ impl Default for FromFieldOp {
 }
 
 impl FieldOp for FromFieldOp {
+    type FieldContext = ();
+
     fn rename(
         mut self,
         rename_to: Option<Ident>,

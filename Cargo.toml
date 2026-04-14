@@ -11,7 +11,7 @@ repository = "https://github.com/qthree/derive_convert"
 
 [dependencies]
 quote = "1"
-syn = { version = "1", features = ["full"] }
+syn = { version = "1", features = ["full", "extra-traits"] }
 proc-macro2 = "1"
 
 [lib]
