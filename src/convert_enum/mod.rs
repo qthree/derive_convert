@@ -3,11 +3,10 @@ mod try_from;
 
 use proc_macro2::{Ident, TokenStream as TokenStream2};
 use quote::quote;
-use syn::{DataEnum, Fields, FieldsUnnamed, Type, TypePath};
+use syn::{DataEnum, Fields, FieldsNamed, FieldsUnnamed, Member, Type, TypePath, spanned::Spanned};
 
 use crate::{
-    ContainerAttrs, FieldAttrs, FieldNamer, FieldOp, TypeRef, Types,
-    parse_field_attrs,
+    ContainerAttrs, FieldAttrs, FieldNamer, FieldOp, TypeRef, Types, convert_struct::AllFieldsOptions, parse_field_attrs,
 };
 
 pub(super) fn derive_convert_enum(
@@ -42,21 +41,26 @@ pub(super) fn derive_convert_enum(
     .collect()
 }
 
-struct OneVariantOptions<'a, FO> {
+struct OneVariantOptions<'a, FO: FieldOp> {
     name: &'a Ident,
-    context: VariantContext,
+    context: FO::FieldContext,
     attrs: FieldAttrs<FO>,
 }
 
-struct VariantContext {
-    has_one_field: bool,
+struct VariantContext<FieldsOps> {
+    fields: Option<AllFieldsOptions<FieldsOps>>,
 }
 
-struct AllVariantsOptions<'a, FO> {
+struct VariantField {
+    from: Member,
+    to: Member,
+}
+
+struct AllVariantsOptions<'a, FO: FieldOp> {
     variants: Vec<OneVariantOptions<'a, FO>>,
 }
 
-impl<'a, FO: FieldOp<FieldContext = VariantContext>>
+impl<'a, FO: FieldOp<FieldContext = VariantContext<FieldsOps>, Member = Ident>, FieldsOps: FieldOp<FieldContext = (), Member = Member>>
     AllVariantsOptions<'a, FO>
 {
     fn parse(data: &'a DataEnum, filter_path: &str, types: &Types) -> Self {
@@ -64,19 +68,21 @@ impl<'a, FO: FieldOp<FieldContext = VariantContext>>
         let variants = variants
             .into_iter()
             .map(|variant| {
-                let has_one_field = match &variant.fields {
-                    Fields::Unnamed(FieldsUnnamed{unnamed, ..}) if unnamed.len() == 1 => {
-                        true
-                    },
-                    _ if variant.fields.is_empty() => false,
-                    _ => unimplemented!("Only C-like enums or single field unnamed variants are supported: {:?}", variant.fields),
+                let fields = if variant.fields.is_empty() {
+                    None
+                } else {
+                    let fields = AllFieldsOptions::<FieldsOps>::parse(&variant.fields, filter_path, types);
+                    if fields.len() != 1 {
+                        unimplemented!("Only C-like enums or single field variants are supported: {:?}", variant.fields);
+                    }
+                    Some(fields)
                 };
                 let attrs = parse_field_attrs(&variant.attrs, filter_path)
                     .expect("Parse attributes to find field options");
                 attrs.check(types);
                 OneVariantOptions {
                     name: &variant.ident,
-                    context: VariantContext { has_one_field },
+                    context: VariantContext { fields },
                     attrs,
                 }
             })
@@ -96,18 +102,22 @@ impl<'a, FO: FieldOp<FieldContext = VariantContext>>
     ) -> (TokenStream2, TokenStream2) {
         let mut foreign_fields: Vec<_> =
             extra_foreign_fields.ignores().cloned().collect();
+        let mut slot = 0;
         let lines = self.variants.iter().map(|field| {
             let name = field.name;
             let mut namer = FieldNamer {
                 from_self,
                 name,
-                foreign_field: None,
+                name_slot: Err(slot),
                 from,
                 to,
                 context: &field.context,
             };
             let res = field.attrs.map_for(key).quote(&mut namer);
-            foreign_fields.extend(namer.foreign_field.into_iter().cloned());
+            if let Ok(name_slot) = namer.name_slot {
+                foreign_fields.push(name_slot.clone());
+                slot += 1;
+            }
             res
         });
         let lines = quote!(
@@ -135,3 +145,15 @@ fn quote_foreign_fields(from: &Type, foreign_fields: &[Ident]) -> TokenStream2 {
         )
     }
 }
+/*
+fn variant_default(namer: &mut FieldNamer<'_, VariantContext>) -> TokenStream2 {
+        let name = namer.name;
+        let _ = namer.with(None);
+
+        if let Some(_) = has_one_field {
+            quote!(#from::#name(_) => #to::default(),)
+        } else {
+            quote!(#from::#name => #to::default(),)
+        }
+}
+*/

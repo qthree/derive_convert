@@ -1,11 +1,10 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{DataEnum, Expr, Ident, Type};
+use syn::{DataEnum, Expr, Ident, Member, Type};
 
 use super::AllVariantsOptions;
 use crate::{
-    FieldNamer, FieldOp, FromAttrs, ParseAttrsError, TypeRef,
-    convert_enum::VariantContext,
+    FieldNamer, FieldOp, FromAttrs, ParseAttrsError, TypeRef, convert_enum::VariantContext, convert_struct::from::FromFieldOp,
 };
 
 enum FromVariantOp {
@@ -21,7 +20,8 @@ impl Default for FromVariantOp {
 }
 
 impl FieldOp for FromVariantOp {
-    type FieldContext = VariantContext;
+    type FieldContext = VariantContext<FromFieldOp>;
+    type Member = Ident;
 
     fn rename(
         mut self,
@@ -54,17 +54,18 @@ impl FieldOp for FromVariantOp {
         namer @ &mut FieldNamer {
             from,
             to,
-            context: &VariantContext { has_one_field },
+            context,
             ..
-        }: &mut FieldNamer<'a, VariantContext>,
+        }: &mut FieldNamer<'a, Self>,
     ) -> TokenStream2 {
         let name = namer.name;
+        let has_one_field = &context.fields;
         match self {
             FromVariantOp::Into { rename } => {
                 let (this, other) = namer.with(rename);
 
-                if has_one_field {
-                    quote!(#from::#other(___value) => #to::#this(___value.into()),)
+                if let Some(field) = has_one_field {
+                    quote!(#from::#other{#field: ___value} => #to::#this{#field: ___value.into()},)
                 } else {
                     quote!(#from::#other => #to::#this,)
                 }
@@ -72,7 +73,7 @@ impl FieldOp for FromVariantOp {
             FromVariantOp::Default => {
                 let _ = namer.with(None);
 
-                if has_one_field {
+                if let Some(_) = has_one_field {
                     quote!(#from::#name(_) => #to::default(),)
                 } else {
                     quote!(#from::#name => #to::default(),)

@@ -1,14 +1,14 @@
 use proc_macro2::{Ident, TokenStream as TokenStream2};
 use quote::quote;
-use syn::{DataStruct, Fields, Type, TypePath};
+use syn::{DataStruct, Fields, Member, Type, TypePath};
 
 use crate::{
     ContainerAttrs, FieldAttrs, FieldNamer, FieldOp, TypeRef, Types,
     parse_field_attrs,
 };
 
-mod from;
-mod try_from;
+pub(super) mod from;
+pub(super) mod try_from;
 
 pub(super) fn derive_convert_struct(
     ContainerAttrs {
@@ -43,34 +43,45 @@ pub(super) fn derive_convert_struct(
     .collect()
 }
 
-struct OneFieldOptions<'a, FO> {
-    name: &'a Ident,
+struct OneFieldOptions<FO> {
+    name: Member,
     attrs: FieldAttrs<FO>,
 }
 
-struct AllFieldsOptions<'a, FO> {
-    fields: Vec<OneFieldOptions<'a, FO>>,
+pub(crate) struct AllFieldsOptions<FO> {
+    fields: Vec<OneFieldOptions<FO>>,
 }
 
-impl<'a, FO: FieldOp<FieldContext = ()>> AllFieldsOptions<'a, FO> {
-    fn parse(fields: &'a Fields, filter_path: &str, types: &Types) -> Self {
+enum ForeignField {
+    NextPos(usize),
+    Name(Member),
+}
+
+impl<FO: FieldOp<FieldContext = (), Member = Member>> AllFieldsOptions<FO> {
+    pub(crate) fn parse(fields: &Fields, filter_path: &str, types: &Types) -> Self {
         let fields = match fields {
             Fields::Named(fields) => &fields.named,
-            _ => unimplemented!("Only structs with named fields are supported"),
+            Fields::Unnamed(fields) => &fields.unnamed,
+            _ => unimplemented!("Unit structs are unsupported"),
         };
         let fields = fields
             .into_iter()
-            .map(|field| {
+            .enumerate()
+            .map(|(i, field)| {
                 let attrs = parse_field_attrs(&field.attrs, filter_path)
                     .expect("Parse attributes to find field options");
                 attrs.check(types);
                 OneFieldOptions {
-                    name: field.ident.as_ref().unwrap(),
+                    name: field.ident.clone().map_or_else(|| Member::Unnamed(i.into()), Member::Named),
                     attrs,
                 }
             })
             .collect();
         AllFieldsOptions { fields }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.fields.len()
     }
 
     fn lines_n_fields(
@@ -84,19 +95,19 @@ impl<'a, FO: FieldOp<FieldContext = ()>> AllFieldsOptions<'a, FO> {
         }: TypeRef,
     ) -> (TokenStream2, TokenStream2) {
         let mut foreign_fields: Vec<_> =
-            extra_foreign_fields.ignores().cloned().collect();
+            extra_foreign_fields.ignores().cloned().map(Member::from).collect();
         let lines = self.fields.iter().map(|field| {
-            let name = field.name;
+            let name = &field.name;
             let mut namer = FieldNamer {
                 from_self,
                 name,
-                foreign_field: None,
+                name_slot: ,
                 from,
                 to,
                 context: &(),
             };
             let res = field.attrs.map_for(key).quote(&mut namer);
-            foreign_fields.extend(namer.foreign_field.into_iter().cloned());
+            foreign_fields.extend(namer.name_slot.into_iter().cloned());
             res
         });
         let extra_lines = extra_foreign_fields
@@ -115,13 +126,13 @@ impl<'a, FO: FieldOp<FieldContext = ()>> AllFieldsOptions<'a, FO> {
     }
 }
 
-fn quote_foreign_fields(from: &Type, foreign_fields: &[Ident]) -> TokenStream2 {
+fn quote_foreign_fields(from: &Type, foreign_fields: &[Member]) -> TokenStream2 {
     if foreign_fields.is_empty() {
         quote!()
     } else {
         quote!(
             {
-                let #from { #(
+                if let #from { #(
                     #foreign_fields: _,
                 )* } = &value;
             }

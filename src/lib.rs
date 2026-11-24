@@ -4,8 +4,7 @@ use proc_macro::TokenStream;
 use proc_macro2::{Ident, TokenStream as TokenStream2};
 use quote::{ToTokens, quote};
 use syn::{
-    Attribute, Data, DeriveInput, Expr, Lit, Meta, MetaList, MetaNameValue,
-    NestedMeta, Path, Type, parse::Parse, parse_macro_input,
+    Attribute, Data, DeriveInput, Expr, Lit, Member, Meta, MetaList, MetaNameValue, NestedMeta, Path, Type, parse::Parse, parse_macro_input,
 };
 
 mod convert_enum;
@@ -39,27 +38,35 @@ pub fn derive_convert(input: TokenStream) -> TokenStream {
     .into()
 }
 
-struct FieldNamer<'a, C = ()> {
+struct FieldNamer<'a, FO: FieldOp> {
     from_self: bool,
-    name: &'a Ident,
-    foreign_field: Option<&'a Ident>,
+    name: &'a FO::Member,
+    name_slot: Result<&'a FO::Member, usize>,
     from: &'a Type,
     to: &'a Type,
-    context: &'a C,
+    context: &'a FO::FieldContext,
 }
-impl<'a, C> FieldNamer<'a, C> {
-    fn with<I: Into<Option<&'a Ident>>>(
+impl<'a, FO: FieldOp> FieldNamer<'a, FO> {
+    fn with<I: Into<Option<&'a FO::Member>>>(
         &mut self,
         rename: I,
-    ) -> (&'a Ident, &'a Ident) {
+    ) -> FieldMapping<&'a FO::Member> {
+        let slot = self.name_slot.err().unwrap();
         if self.from_self {
-            (rename.into().unwrap_or(self.name), self.name)
+            self.name_slot = Ok(self.name);
+            FieldMapping { from: rename.into().unwrap_or(self.name), to: self.name, index: slot }
         } else {
-            let rename = rename.into();
-            self.foreign_field = Some(rename.unwrap_or(self.name));
-            (self.name, rename.unwrap_or(self.name))
+            let rename = rename.into().unwrap_or(self.name);
+            self.name_slot = Ok(rename);
+            FieldMapping { from: self.name, to: rename, index: slot }
         }
     }
+}
+
+struct FieldMapping<M> {
+    from: M,
+    to: M,
+    index: usize,
 }
 
 struct ContainerAttrs {
@@ -88,18 +95,23 @@ struct FromAttrs {
 
 struct Types(HashMap<Ident, AttrType>);
 
-#[derive(Default)]
-struct ForeignFields(HashMap<Ident, ForeignAction>);
+struct ForeignFields<M>(HashMap<M, ForeignAction>);
 
-impl ForeignFields {
-    fn ignores(&self) -> impl Iterator<Item = &Ident> {
+impl<M> Default for ForeignFields<M> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<M> ForeignFields<M> {
+    fn ignores(&self) -> impl Iterator<Item = &M> {
         self.0
             .iter()
             .filter(|(_, f)| matches!(f, ForeignAction::Ignore))
             .map(|(k, _)| k)
     }
 
-    fn defaults(&self) -> impl Iterator<Item = &Ident> {
+    fn defaults(&self) -> impl Iterator<Item = &M> {
         self.0
             .iter()
             .filter(|(_, f)| matches!(f, ForeignAction::Default))
@@ -108,9 +120,11 @@ impl ForeignFields {
 
     fn insert(
         &mut self,
-        field: Ident,
+        field: M,
         action: ForeignAction,
-    ) -> Result<(), ParseAttrsError> {
+    ) -> Result<(), ParseAttrsError>
+    where M: Eq + std::hash::Hash
+    {
         if self.0.insert(field, action).is_some() {
             Err(ParseAttrsError::DuplicateAttributes)
         } else {
@@ -156,7 +170,7 @@ struct TypeRef<'a> {
     key: &'a Ident,
     from: &'a Type,
     to: &'a Type,
-    extra_foreign_fields: &'a ForeignFields,
+    extra_foreign_fields: &'a ForeignFields<Ident>,
 }
 
 fn parse_container_attrs(
@@ -409,7 +423,8 @@ impl ToTokens for MapRef {
 
 trait FieldOp: Sized + Default {
     type FieldContext;
-    fn rename(self, rename_to: Option<Ident>) -> Result<Self, ParseAttrsError>;
+    type Member: Parse + From<Ident> + Clone;
+    fn rename(self, rename_to: Option<Self::Member>) -> Result<Self, ParseAttrsError>;
 
     fn from_key_expr(key: &str, expr: Expr) -> Result<Self, ParseAttrsError>;
 
@@ -417,7 +432,7 @@ trait FieldOp: Sized + Default {
 
     fn quote<'a>(
         &'a self,
-        namer: &mut FieldNamer<'a, Self::FieldContext>,
+        namer: &mut FieldNamer<'a, Self>,
     ) -> TokenStream2;
 }
 
@@ -460,12 +475,12 @@ fn parse_field_attrs<FO: FieldOp>(
                                     {
                                         if &key == "rename" {
                                             let ident =
-                                                single_ident_from_meta_list(
+                                                single_lit_from_meta_list(
                                                     &list,
                                                 )?;
                                             if let Some(_old_rename) =
                                                 with_rename
-                                                    .replace(ident.clone())
+                                                    .replace(ident)
                                             {
                                                 return Err(ParseAttrsError::DuplicateAttributes);
                                             }
@@ -539,8 +554,8 @@ fn map_from_meta_list<FO: FieldOp>(
     map.unwrap_or_default().rename(rename)
 }
 
-enum KeyValue<FO> {
-    Rename(Ident),
+enum KeyValue<FO: FieldOp> {
+    Rename(FO::Member),
     Map(FO),
 }
 
@@ -574,8 +589,8 @@ fn kv_from_meta<FO: FieldOp>(
         Meta::List(list) => {
             if let Some(key) = list.path.get_ident().cloned() {
                 if &key == "rename" {
-                    let ident = single_ident_from_meta_list(list)?;
-                    return Ok(KeyValue::Rename(ident.clone()));
+                    let member = single_lit_from_meta_list(list)?;
+                    return Ok(KeyValue::Rename(member));
                 }
             }
             return Err(ParseAttrsError::UnsupportedStructure);
@@ -626,15 +641,15 @@ fn _single_meta_from_meta_list(
     }
 }
 
-fn single_ident_from_meta_list(
+fn single_lit_from_meta_list<T: Parse + From<Ident>>(
     meta_list: &MetaList,
-) -> Result<Ident, ParseAttrsError> {
+) -> Result<T, ParseAttrsError> {
     if meta_list.nested.len() != 1 {
         return Err(ParseAttrsError::UnsupportedStructure);
     }
     let nested_meta = meta_list.nested.iter().next().unwrap();
     Ok(match nested_meta {
-        NestedMeta::Meta(nested_meta) => ident_from_meta(nested_meta)?.clone(),
+        NestedMeta::Meta(nested_meta) => ident_from_meta(nested_meta)?.clone().into(),
         NestedMeta::Lit(lit) => {
             lit_parse(lit).ok_or(ParseAttrsError::UnsupportedStructure)?
         }

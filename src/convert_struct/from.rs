@@ -1,21 +1,21 @@
-use proc_macro2::{Ident, TokenStream as TokenStream2};
+use proc_macro2::{TokenStream as TokenStream2};
 use quote::quote;
-use syn::{DataStruct, Expr, Type};
+use syn::{DataStruct, Expr, Member, Type};
 
 use super::AllFieldsOptions;
 use crate::{
     FieldNamer, FieldOp, FromAttrs, MapRef, MapType, ParseAttrsError, TypeRef,
 };
 
-enum FromFieldOp {
+pub(crate) enum FromFieldOp {
     Map {
         expr: MapType,
-        rename: Option<Ident>,
+        rename: Option<Member>,
         map_ref: MapRef,
     },
     New(MapType),
     Into {
-        rename: Option<Ident>,
+        rename: Option<Member>,
     },
     Default,
     Skip,
@@ -29,10 +29,11 @@ impl Default for FromFieldOp {
 
 impl FieldOp for FromFieldOp {
     type FieldContext = ();
+    type Member = Member;
 
     fn rename(
         mut self,
-        rename_to: Option<Ident>,
+        rename_to: Option<Member>,
     ) -> Result<Self, ParseAttrsError> {
         match &mut self {
             Self::Map { rename, .. } | Self::Into { rename } => {
@@ -74,7 +75,7 @@ impl FieldOp for FromFieldOp {
         })
     }
 
-    fn quote<'a>(&'a self, namer: &mut FieldNamer<'a>) -> TokenStream2 {
+    fn quote<'a>(&'a self, namer: &mut FieldNamer<'a, Self>) -> TokenStream2 {
         let name = namer.name;
         match self {
             FromFieldOp::Map {

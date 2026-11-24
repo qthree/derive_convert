@@ -63,13 +63,15 @@ struct Foo3 {
 #[from(V1 = "FooColor1")]
 enum FooColor {
     Foo(Foo),
-    Color(Color),
+    Color{ color: Color },
+    Another( #[from(rename = "color")] Color),
 }
 
 #[allow(dead_code)]
 enum FooColor1 {
     Foo(Foo1),
-    Color(Color1),
+    Color{ color: Color1 },
+    Another{ color: Color1 },
 }
 
 #[allow(dead_code)]
@@ -77,5 +79,6 @@ enum FooColor1 {
 #[from_self(COMMON = "FooColor")]
 enum FooColor2 {
     Foo(Foo2),
-    Color(Color2),
+    Color{ color: Color2 },
+    Another{ #[from_self(rename = "0")] color: Color2 },
 }
